@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from pydantic import BaseModel, EmailStr
+from fastapi import Request
 from passlib.context import CryptContext
 import jwt
 import datetime
@@ -81,13 +82,16 @@ def create_access_token(data: dict):
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-def get_current_user(token: str = Depends(lambda r: r.headers.get("Authorization")), db: Session = Depends(get_db)):
+def get_current_user(request: Request, db: Session = Depends(get_db)):
+    token = request.headers.get("Authorization")
     if not token or not token.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Not authenticated")
+    
     try:
         payload = jwt.decode(token.split(" ")[1], SECRET_KEY, algorithms=[ALGORITHM])
         user = db.query(User).filter(User.id == payload.get("user_id")).first()
-        if user is None: raise HTTPException(status_code=401)
+        if user is None: 
+            raise HTTPException(status_code=401)
         return user
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
