@@ -3,6 +3,7 @@ uvicorn
 sqlalchemy
 pydantic
 email-validator
-passlib[bcrypt]
+passlib
+bcrypt==3.2.2
 pyjwt
 psycopg2-binary
