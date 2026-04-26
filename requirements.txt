@@ -92,7 +92,6 @@ pure_eval==0.2.3
 pycparser==3.0
 pydantic==2.13.3
 pydantic_core==2.46.3
-pygame==2.6.1
 Pygments==2.19.2
 pyinstaller==6.13.0
 pyinstaller-hooks-contrib==2025.3
