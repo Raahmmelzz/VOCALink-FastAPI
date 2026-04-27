@@ -17,6 +17,15 @@ import os # Make sure this is imported at the top of your file!
 # 1. Grab the Render Postgres URL (or fall back to local SQLite if on your laptop)
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./vocalink.db")
 
+# 💥 Auto-migration hack
+try:
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN first_name VARCHAR DEFAULT ''"))
+        conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN last_name VARCHAR DEFAULT ''"))
+        conn.commit()
+except Exception:
+    pass
+
 # 2. SQLAlchemy requires 'postgresql://' but Render gives 'postgres://', so we fix it:
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
@@ -39,6 +48,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # --- 2. DATABASE MODELS (SQLAlchemy) ---
 class User(Base):
     __tablename__ = "users"
@@ -54,12 +64,12 @@ class TeacherProfile(Base):
     __tablename__ = "teacher_profiles"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
+    first_name = Column(String, default="") # 💥 Moved here!
+    last_name = Column(String, default="")  # 💥 Moved here!
     display_name = Column(String, default="")
     contact_number = Column(String, default="")
     room_section = Column(String, default="")
     department = Column(String, default="")
-    
-    user = relationship("User", back_populates="teacher_profile")
 
 Base.metadata.create_all(bind=engine)
 
@@ -153,6 +163,8 @@ def get_me(user: User = Depends(get_current_user)):
     return {
         "username": user.username,
         "email": user.email,
+        "first_name": profile.first_name if profile else "", # 💥 Point to profile
+        "last_name": profile.last_name if profile else "",   # 💥 Point to profile
         "display_name": profile.display_name if profile else "",
         "contact_number": profile.contact_number if profile else "",
         "room_section": profile.room_section if profile else "",
@@ -161,12 +173,14 @@ def get_me(user: User = Depends(get_current_user)):
 
 @app.patch("/api/users/me/")
 def update_me(data: ProfileUpdateSchema, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Update core user info if provided
+    # Update core user info
     if data.username: user.username = data.username
     if data.email: user.email = data.email
     
     # Update profile info
     if user.teacher_profile:
+        if data.first_name is not None: user.teacher_profile.first_name = data.first_name # 💥 Point to profile
+        if data.last_name is not None: user.teacher_profile.last_name = data.last_name   # 💥 Point to profile
         if data.display_name is not None: user.teacher_profile.display_name = data.display_name
         if data.contact_number is not None: user.teacher_profile.contact_number = data.contact_number
         if data.room_section is not None: user.teacher_profile.room_section = data.room_section
