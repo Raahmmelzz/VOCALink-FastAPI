@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from pydantic import BaseModel, EmailStr
+from typing import Optional
 from fastapi import Request
 from passlib.context import CryptContext
 import jwt
@@ -81,6 +82,28 @@ columns_to_add = [
     "bio VARCHAR DEFAULT ''"
 ]
 
+class StudentProfile(Base):
+    __tablename__ = "student_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True)
+    
+    # 💥 YOUR BRILLIANT FIX: Pointing strictly to the TeacherProfile table!
+    instructor_id = Column(Integer, ForeignKey("teacher_profiles.id", ondelete="SET NULL"), nullable=True)
+    
+    first_name = Column(String, nullable=True)
+    last_name = Column(String, nullable=True)
+    bio = Column(String, nullable=True)
+    grade_level = Column(String, nullable=True)
+    disability_type = Column(String, nullable=True)
+
+    # 💥 Link it back to the TeacherProfile model
+    instructor = relationship("TeacherProfile", back_populates="students")
+    
+    # Keep the main user link too!
+    user = relationship("User", back_populates="student_profile")
+
+
 for column in columns_to_add:
     try:
         with engine.connect() as conn:
@@ -95,6 +118,13 @@ class RegisterSchema(BaseModel):
     email: EmailStr
     password: str
     status: str = "TEACHER"
+    
+class ProfileUpdate(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    bio: Optional[str] = None
+    grade_level: Optional[str] = None
+    disability_type: Optional[str] = None
 
 class LoginSchema(BaseModel):
     identifier: str # React sends this! Can be email or username
@@ -216,3 +246,37 @@ def update_me(data: ProfileUpdateSchema, user: User = Depends(get_current_user),
 
     db.commit()
     return {"message": "Profile updated"}
+
+
+@app.put("/profile/me")
+def update_profile(
+    profile_data: ProfileUpdate, 
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user) # Assuming you have a token verifier!
+):
+    # Find their specific profile
+    profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    # Update the fields if new data was provided
+    if profile_data.first_name is not None: profile.first_name = profile_data.first_name
+    if profile_data.last_name is not None: profile.last_name = profile_data.last_name
+    if profile_data.bio is not None: profile.bio = profile_data.bio
+    if profile_data.grade_level is not None: profile.grade_level = profile_data.grade_level
+    if profile_data.disability_type is not None: profile.disability_type = profile_data.disability_type
+
+    db.commit()
+    return {"message": "Profile updated successfully!"}
+
+# 3. THE DELETE ROUTE (DELETE)
+@app.delete("/profile/me")
+def delete_account(
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
+    # Because you set ondelete="CASCADE" in your models, deleting the user 
+    # will automatically delete their StudentProfile too!
+    db.delete(current_user)
+    db.commit()
+    return {"message": "Account permanently deleted."}
