@@ -71,6 +71,8 @@ class TeacherProfile(Base):
     room_section = Column(String, default="")
     department = Column(String, default="")
 
+    user = relationship("User", back_populates="teacher_profile")   
+    
 Base.metadata.create_all(bind=engine)
 
 # --- 3. SCHEMAS (Pydantic) ---
