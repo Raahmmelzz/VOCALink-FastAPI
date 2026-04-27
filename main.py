@@ -12,7 +12,19 @@ import datetime
 SECRET_KEY = "your-super-secret-jwt-key"
 ALGORITHM = "HS256"
 
-engine = create_engine("sqlite:///./vocalink.db", connect_args={"check_same_thread": False})
+import os # Make sure this is imported at the top of your file!
+
+# 1. Grab the Render Postgres URL (or fall back to local SQLite if on your laptop)
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./vocalink.db")
+
+# 2. SQLAlchemy requires 'postgresql://' but Render gives 'postgres://', so we fix it:
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+# 3. Only use the SQLite specific arguments if we are actually using SQLite
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+
+engine = create_engine(DATABASE_URL, connect_args=connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
