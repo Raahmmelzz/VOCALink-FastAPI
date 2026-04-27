@@ -91,6 +91,8 @@ class LoginSchema(BaseModel):
 class ProfileUpdateSchema(BaseModel):
     username: str | None = None
     email: EmailStr | None = None
+    first_name: str | None = None  # 💥 ADD THIS!
+    last_name: str | None = None
     display_name: str | None = None
     contact_number: str | None = None
     room_section: str | None = None
