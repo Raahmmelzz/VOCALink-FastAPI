@@ -64,6 +64,9 @@ class TeacherProfile(Base):
     contact_number = Column(String, default="")
     room_section = Column(String, default="")
     department = Column(String, default="")
+    grade_handled = Column(String, default="") # 💥 ADD THIS
+    organization = Column(String, default="")  # 💥 ADD THIS (School)
+    bio = Column(String, default="")
 
     user = relationship("User", back_populates="teacher_profile")   
     
@@ -73,9 +76,12 @@ try:
     with engine.connect() as conn:
         conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN first_name VARCHAR DEFAULT ''"))
         conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN last_name VARCHAR DEFAULT ''"))
+        conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN grade_handled VARCHAR DEFAULT ''")) # 💥 ADD THIS
+        conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN organization VARCHAR DEFAULT ''"))  # 💥 ADD THIS
+        conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN bio VARCHAR DEFAULT ''"))           # 💥 ADD THIS
         conn.commit()
 except Exception as e:
-    print(f"Migration check: {e}") # This will print the error instead of hiding it!
+    print(f"Migration check: {e}")
 
 # --- 3. SCHEMAS (Pydantic) ---
 class RegisterSchema(BaseModel):
@@ -97,6 +103,9 @@ class ProfileUpdateSchema(BaseModel):
     contact_number: str | None = None
     room_section: str | None = None
     department: str | None = None
+    grade_handled: str | None = None # 💥 ADD THIS
+    organization: str | None = None  # 💥 ADD THIS
+    bio: str | None = None
 
 # --- 4. DEPENDENCIES & HELPERS ---
 def get_db():
@@ -175,6 +184,9 @@ def get_me(user: User = Depends(get_current_user)):
         "contact_number": profile.contact_number if profile else "",
         "room_section": profile.room_section if profile else "",
         "department": profile.department if profile else "",
+        "grade_handled": profile.grade_handled if profile else "", # 💥 ADD THIS
+        "organization": profile.organization if profile else "",   # 💥 ADD THIS
+        "bio": profile.bio if profile else "",
     }
 
 @app.patch("/api/users/me/")
@@ -191,6 +203,10 @@ def update_me(data: ProfileUpdateSchema, user: User = Depends(get_current_user),
         if data.contact_number is not None: user.teacher_profile.contact_number = data.contact_number
         if data.room_section is not None: user.teacher_profile.room_section = data.room_section
         if data.department is not None: user.teacher_profile.department = data.department
+        if data.grade_handled is not None: user.teacher_profile.grade_handled = data.grade_handled # 💥 ADD THIS
+        if data.organization is not None: user.teacher_profile.organization = data.organization    # 💥 ADD THIS
+        if data.bio is not None: user.teacher_profile.bio = data.bio
+        
 
     db.commit()
     return {"message": "Profile updated"}
