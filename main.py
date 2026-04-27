@@ -72,16 +72,22 @@ class TeacherProfile(Base):
     
 Base.metadata.create_all(bind=engine)
 
-try:
-    with engine.connect() as conn:
-        conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN first_name VARCHAR DEFAULT ''"))
-        conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN last_name VARCHAR DEFAULT ''"))
-        conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN grade_handled VARCHAR DEFAULT ''")) # 💥 ADD THIS
-        conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN organization VARCHAR DEFAULT ''"))  # 💥 ADD THIS
-        conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN bio VARCHAR DEFAULT ''"))           # 💥 ADD THIS
-        conn.commit()
-except Exception as e:
-    print(f"Migration check: {e}")
+# 💥 THE BULLETPROOF AUTO-MIGRATION HACK
+columns_to_add = [
+    "first_name VARCHAR DEFAULT ''",
+    "last_name VARCHAR DEFAULT ''",
+    "grade_handled VARCHAR DEFAULT ''",
+    "organization VARCHAR DEFAULT ''",
+    "bio VARCHAR DEFAULT ''"
+]
+
+for column in columns_to_add:
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(f"ALTER TABLE teacher_profiles ADD COLUMN {column}"))
+            conn.commit()
+    except Exception:
+        pass # If the column already exists, just ignore the error and check the next one!
 
 # --- 3. SCHEMAS (Pydantic) ---
 class RegisterSchema(BaseModel):
