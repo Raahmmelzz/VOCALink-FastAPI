@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException, status
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, text
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
@@ -18,13 +19,6 @@ import os # Make sure this is imported at the top of your file!
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./vocalink.db")
 
 # 💥 Auto-migration hack
-try:
-    with engine.connect() as conn:
-        conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN first_name VARCHAR DEFAULT ''"))
-        conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN last_name VARCHAR DEFAULT ''"))
-        conn.commit()
-except Exception:
-    pass
 
 # 2. SQLAlchemy requires 'postgresql://' but Render gives 'postgres://', so we fix it:
 if DATABASE_URL.startswith("postgres://"):
@@ -74,6 +68,14 @@ class TeacherProfile(Base):
     user = relationship("User", back_populates="teacher_profile")   
     
 Base.metadata.create_all(bind=engine)
+
+try:
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN first_name VARCHAR DEFAULT ''"))
+        conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN last_name VARCHAR DEFAULT ''"))
+        conn.commit()
+except Exception as e:
+    print(f"Migration check: {e}") # This will print the error instead of hiding it!
 
 # --- 3. SCHEMAS (Pydantic) ---
 class RegisterSchema(BaseModel):
