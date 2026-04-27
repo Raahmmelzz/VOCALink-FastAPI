@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, text
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from pydantic import BaseModel, EmailStr
 from typing import Optional
@@ -9,23 +8,16 @@ from fastapi import Request
 from passlib.context import CryptContext
 import jwt
 import datetime
+import os 
 
 # --- 1. SETUP & CONFIG ---
 SECRET_KEY = "your-super-secret-jwt-key"
 ALGORITHM = "HS256"
 
-import os # Make sure this is imported at the top of your file!
-
-# 1. Grab the Render Postgres URL (or fall back to local SQLite if on your laptop)
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./vocalink.db")
-
-# 💥 Auto-migration hack
-
-# 2. SQLAlchemy requires 'postgresql://' but Render gives 'postgres://', so we fix it:
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# 3. Only use the SQLite specific arguments if we are actually using SQLite
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 
 engine = create_engine(DATABASE_URL, connect_args=connect_args)
@@ -34,7 +26,6 @@ Base = declarative_base()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 app = FastAPI(title="VocaLink API")
 
-# Fix CORS so React can talk to it!
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -42,7 +33,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # --- 2. DATABASE MODELS (SQLAlchemy) ---
 class User(Base):
@@ -54,41 +44,30 @@ class User(Base):
     status = Column(String, default="STUDENT")
     
     teacher_profile = relationship("TeacherProfile", back_populates="user", uselist=False)
+    student_profile = relationship("StudentProfile", back_populates="user", uselist=False)
 
 class TeacherProfile(Base):
     __tablename__ = "teacher_profiles"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
-    first_name = Column(String, default="") # 💥 Moved here!
-    last_name = Column(String, default="")  # 💥 Moved here!
+    first_name = Column(String, default="") 
+    last_name = Column(String, default="")  
     display_name = Column(String, default="")
     contact_number = Column(String, default="")
     room_section = Column(String, default="")
     department = Column(String, default="")
-    grade_handled = Column(String, default="") # 💥 ADD THIS
-    organization = Column(String, default="")  # 💥 ADD THIS (School)
+    grade_handled = Column(String, default="") 
+    organization = Column(String, default="")  
     bio = Column(String, default="")
 
     user = relationship("User", back_populates="teacher_profile")   
-    
-Base.metadata.create_all(bind=engine)
+    students = relationship("StudentProfile", back_populates="instructor")
 
-# 💥 THE BULLETPROOF AUTO-MIGRATION HACK
-columns_to_add = [
-    "first_name VARCHAR DEFAULT ''",
-    "last_name VARCHAR DEFAULT ''",
-    "grade_handled VARCHAR DEFAULT ''",
-    "organization VARCHAR DEFAULT ''",
-    "bio VARCHAR DEFAULT ''"
-]
-
+# 💥 MOVED THIS UP: Now SQLAlchemy knows about it BEFORE it creates tables!
 class StudentProfile(Base):
     __tablename__ = "student_profiles"
-
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True)
-    
-    # 💥 YOUR BRILLIANT FIX: Pointing strictly to the TeacherProfile table!
     instructor_id = Column(Integer, ForeignKey("teacher_profiles.id", ondelete="SET NULL"), nullable=True)
     
     first_name = Column(String, nullable=True)
@@ -97,27 +76,32 @@ class StudentProfile(Base):
     grade_level = Column(String, nullable=True)
     disability_type = Column(String, nullable=True)
 
-    # 💥 Link it back to the TeacherProfile model
     instructor = relationship("TeacherProfile", back_populates="students")
-    
-    # Keep the main user link too!
     user = relationship("User", back_populates="student_profile")
 
+# 💥 Tell the database to build all the tables NOW.
+Base.metadata.create_all(bind=engine)
 
-for column in columns_to_add:
+# 💥 THE BULLETPROOF AUTO-MIGRATION HACK
+# Keeping your awesome hack to add missing columns to existing databases!
+columns_to_add_teacher = [
+    "first_name VARCHAR DEFAULT ''", "last_name VARCHAR DEFAULT ''",
+    "grade_handled VARCHAR DEFAULT ''", "organization VARCHAR DEFAULT ''", "bio VARCHAR DEFAULT ''"
+]
+for column in columns_to_add_teacher:
     try:
         with engine.connect() as conn:
             conn.execute(text(f"ALTER TABLE teacher_profiles ADD COLUMN {column}"))
             conn.commit()
     except Exception:
-        pass # If the column already exists, just ignore the error and check the next one!
+        pass
 
 # --- 3. SCHEMAS (Pydantic) ---
 class RegisterSchema(BaseModel):
     username: str
     email: EmailStr
     password: str
-    status: str = "TEACHER"
+    status: str = "TEACHER" # Note: Mobile app currently overrides this to "STUDENT"
     
 class ProfileUpdate(BaseModel):
     first_name: Optional[str] = None
@@ -127,20 +111,20 @@ class ProfileUpdate(BaseModel):
     disability_type: Optional[str] = None
 
 class LoginSchema(BaseModel):
-    identifier: str # React sends this! Can be email or username
+    identifier: str 
     password: str
 
 class ProfileUpdateSchema(BaseModel):
     username: str | None = None
     email: EmailStr | None = None
-    first_name: str | None = None  # 💥 ADD THIS!
+    first_name: str | None = None  
     last_name: str | None = None
     display_name: str | None = None
     contact_number: str | None = None
     room_section: str | None = None
     department: str | None = None
-    grade_handled: str | None = None # 💥 ADD THIS
-    organization: str | None = None  # 💥 ADD THIS
+    grade_handled: str | None = None 
+    organization: str | None = None  
     bio: str | None = None
 
 # --- 4. DEPENDENCIES & HELPERS ---
@@ -174,11 +158,9 @@ def get_current_user(request: Request, db: Session = Depends(get_db)):
 # --- 5. ROUTES ---
 @app.post("/api/auth/register/")
 def register(data: RegisterSchema, db: Session = Depends(get_db)):
-    # Check if username or email exists
     if db.query(User).filter((User.username == data.username) | (User.email == data.email)).first():
         raise HTTPException(status_code=400, detail="Username or email already taken")
     
-    # Create User
     new_user = User(
         username=data.username,
         email=data.email,
@@ -189,77 +171,77 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(new_user)
 
-    # Automatically create the Teacher Profile (Replaces Django Signals!)
+    # 💥 FIXED: Now it automatically builds the CORRECT profile based on status!
     if new_user.status == "TEACHER":
         profile = TeacherProfile(user_id=new_user.id)
         db.add(profile)
-        db.commit()
-
+    elif new_user.status == "STUDENT":
+        profile = StudentProfile(user_id=new_user.id)
+        db.add(profile)
+        
+    db.commit()
     return {"message": "User created successfully"}
 
 @app.post("/api/auth/login/")
 def login(data: LoginSchema, db: Session = Depends(get_db)):
-    # Find by username OR email
     user = db.query(User).filter((User.username == data.identifier) | (User.email == data.identifier)).first()
     
     if not user or not pwd_context.verify(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
         
     access_token = create_access_token(data={"user_id": user.id})
-    return {"access": access_token, "status": user.status}
+    # 💥 FIXED: Changed "access" to "access_token" to match the React Native code!
+    return {"access_token": access_token, "status": user.status}
 
+# --- TEACHER ROUTES ---
 @app.get("/api/users/me/")
 def get_me(user: User = Depends(get_current_user)):
     profile = user.teacher_profile
     return {
         "username": user.username,
         "email": user.email,
-        "first_name": profile.first_name if profile else "", # 💥 Point to profile
-        "last_name": profile.last_name if profile else "",   # 💥 Point to profile
+        "first_name": profile.first_name if profile else "", 
+        "last_name": profile.last_name if profile else "",   
         "display_name": profile.display_name if profile else "",
         "contact_number": profile.contact_number if profile else "",
         "room_section": profile.room_section if profile else "",
         "department": profile.department if profile else "",
-        "grade_handled": profile.grade_handled if profile else "", # 💥 ADD THIS
-        "organization": profile.organization if profile else "",   # 💥 ADD THIS
+        "grade_handled": profile.grade_handled if profile else "", 
+        "organization": profile.organization if profile else "",   
         "bio": profile.bio if profile else "",
     }
 
 @app.patch("/api/users/me/")
 def update_me(data: ProfileUpdateSchema, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Update core user info
     if data.username: user.username = data.username
     if data.email: user.email = data.email
     
-    # Update profile info
     if user.teacher_profile:
-        if data.first_name is not None: user.teacher_profile.first_name = data.first_name # 💥 Point to profile
-        if data.last_name is not None: user.teacher_profile.last_name = data.last_name   # 💥 Point to profile
+        if data.first_name is not None: user.teacher_profile.first_name = data.first_name 
+        if data.last_name is not None: user.teacher_profile.last_name = data.last_name   
         if data.display_name is not None: user.teacher_profile.display_name = data.display_name
         if data.contact_number is not None: user.teacher_profile.contact_number = data.contact_number
         if data.room_section is not None: user.teacher_profile.room_section = data.room_section
         if data.department is not None: user.teacher_profile.department = data.department
-        if data.grade_handled is not None: user.teacher_profile.grade_handled = data.grade_handled # 💥 ADD THIS
-        if data.organization is not None: user.teacher_profile.organization = data.organization    # 💥 ADD THIS
+        if data.grade_handled is not None: user.teacher_profile.grade_handled = data.grade_handled 
+        if data.organization is not None: user.teacher_profile.organization = data.organization    
         if data.bio is not None: user.teacher_profile.bio = data.bio
         
-
     db.commit()
     return {"message": "Profile updated"}
 
-
-@app.put("/profile/me")
+# --- STUDENT ROUTES ---
+# 💥 FIXED: Added the /api prefix so React Native can find it!
+@app.put("/api/profile/me")
 def update_profile(
     profile_data: ProfileUpdate, 
     db: Session = Depends(get_db), 
-    current_user: User = Depends(get_current_user) # Assuming you have a token verifier!
+    current_user: User = Depends(get_current_user) 
 ):
-    # Find their specific profile
     profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
 
-    # Update the fields if new data was provided
     if profile_data.first_name is not None: profile.first_name = profile_data.first_name
     if profile_data.last_name is not None: profile.last_name = profile_data.last_name
     if profile_data.bio is not None: profile.bio = profile_data.bio
@@ -269,14 +251,12 @@ def update_profile(
     db.commit()
     return {"message": "Profile updated successfully!"}
 
-# 3. THE DELETE ROUTE (DELETE)
-@app.delete("/profile/me")
+# 💥 FIXED: Added the /api prefix so React Native can find it!
+@app.delete("/api/profile/me")
 def delete_account(
     db: Session = Depends(get_db), 
     current_user: User = Depends(get_current_user)
 ):
-    # Because you set ondelete="CASCADE" in your models, deleting the user 
-    # will automatically delete their StudentProfile too!
     db.delete(current_user)
     db.commit()
     return {"message": "Account permanently deleted."}
