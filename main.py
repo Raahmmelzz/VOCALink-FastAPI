@@ -35,6 +35,7 @@ app.add_middleware(
 )
 
 # --- 2. DATABASE MODELS (SQLAlchemy) ---
+import datetime as dt
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
@@ -79,6 +80,15 @@ class StudentProfile(Base):
     instructor = relationship("TeacherProfile", back_populates="students")
     user = relationship("User", back_populates="student_profile")
 
+class AACLog(Base):
+    __tablename__ = "aac_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
+    icon_id = Column(String)
+    icon_label = Column(String)
+    message = Column(String, nullable=True)
+    tapped_at = Column(String, default=lambda: dt.datetime.utcnow().isoformat())
+
 # 💥 Tell the database to build all the tables NOW.
 Base.metadata.create_all(bind=engine)
 
@@ -111,8 +121,13 @@ class ProfileUpdate(BaseModel):
     disability_type: Optional[str] = None
 
 class LoginSchema(BaseModel):
-    identifier: str 
+    identifier: str
     password: str
+
+class AACLogSchema(BaseModel):
+    icon_id: str
+    icon_label: str
+    message: Optional[str] = None
 
 class ProfileUpdateSchema(BaseModel):
     username: str | None = None
@@ -254,9 +269,76 @@ def update_profile(
 # 💥 FIXED: Added the /api prefix so React Native can find it!
 @app.delete("/api/profile/me")
 def delete_account(
-    db: Session = Depends(get_db), 
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     db.delete(current_user)
     db.commit()
     return {"message": "Account permanently deleted."}
+
+# --- SHARED PROFILE GET (works for both student and teacher) ---
+@app.get("/api/profile/me")
+def get_profile(current_user: User = Depends(get_current_user)):
+    if current_user.status == "TEACHER":
+        p = current_user.teacher_profile
+        return {
+            "id": current_user.id,
+            "username": current_user.username,
+            "email": current_user.email,
+            "status": current_user.status,
+            "first_name": p.first_name if p else "",
+            "last_name": p.last_name if p else "",
+            "display_name": p.display_name if p else "",
+            "department": p.department if p else "",
+            "room_section": p.room_section if p else "",
+            "bio": p.bio if p else "",
+        }
+    else:
+        p = current_user.student_profile
+        return {
+            "id": current_user.id,
+            "username": current_user.username,
+            "email": current_user.email,
+            "status": current_user.status,
+            "first_name": p.first_name if p else "",
+            "last_name": p.last_name if p else "",
+            "grade_level": p.grade_level if p else "",
+            "disability_type": p.disability_type if p else "",
+            "bio": p.bio if p else "",
+        }
+
+# --- ICON TAP LOGS ---
+@app.post("/api/logs/")
+def log_icon_tap(
+    data: AACLogSchema,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    log = AACLog(
+        user_id=current_user.id,
+        icon_id=data.icon_id,
+        icon_label=data.icon_label,
+        message=data.message,
+        tapped_at=dt.datetime.utcnow().isoformat(),
+    )
+    db.add(log)
+    db.commit()
+    return {"message": "Log saved."}
+
+@app.get("/api/logs/")
+def get_logs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    logs = db.query(AACLog).filter(AACLog.user_id == current_user.id)\
+              .order_by(AACLog.id.desc()).limit(50).all()
+    return [
+        {
+            "id": l.id,
+            "icon_id": l.icon_id,
+            "icon_label": l.icon_label,
+            "message": l.message,
+            "tapped_at": l.tapped_at,
+        }
+        for l in logs
+    ]
