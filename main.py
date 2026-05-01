@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
+from fastapi.responses import StreamingResponse
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, text
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
@@ -8,7 +9,9 @@ from fastapi import Request
 from passlib.context import CryptContext
 import jwt
 import datetime
-import os 
+import os
+import io
+import tempfile 
 
 # --- 1. SETUP & CONFIG ---
 SECRET_KEY = "your-super-secret-jwt-key"
@@ -128,6 +131,9 @@ class AACLogSchema(BaseModel):
     icon_id: str
     icon_label: str
     message: Optional[str] = None
+
+class TTSSchema(BaseModel):
+    text: str
 
 class ProfileUpdateSchema(BaseModel):
     username: str | None = None
@@ -342,3 +348,57 @@ def get_logs(
         }
         for l in logs
     ]
+
+# --- PHASE 3: TTS (gTTS) ---
+@app.post("/api/tts/")
+def text_to_speech(
+    data: TTSSchema,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        from gtts import gTTS
+        tts = gTTS(text=data.text, lang='en')
+        buf = io.BytesIO()
+        tts.write_to_fp(buf)
+        buf.seek(0)
+        return StreamingResponse(
+            buf,
+            media_type="audio/mpeg",
+            headers={"Content-Disposition": "inline; filename=tts.mp3"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}")
+
+# --- PHASE 3: STT (Whisper) ---
+# Lazy-load the model so the server starts fast
+_whisper_model = None
+
+def get_whisper_model():
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+        _whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
+    return _whisper_model
+
+@app.post("/api/stt/")
+async def speech_to_text(
+    audio: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        # Save uploaded audio to a temp file
+        suffix = os.path.splitext(audio.filename or "audio.wav")[1] or ".wav"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(await audio.read())
+            tmp_path = tmp.name
+
+        try:
+            model = get_whisper_model()
+            segments, _ = model.transcribe(tmp_path, language="en")
+            text = " ".join(seg.text.strip() for seg in segments)
+            return {"text": text.strip()}
+        finally:
+            os.unlink(tmp_path)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"STT failed: {str(e)}")
