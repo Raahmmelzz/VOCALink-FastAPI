@@ -1,17 +1,18 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, text
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from pydantic import BaseModel, EmailStr
-from typing import Optional
+from typing import Optional, List
 from fastapi import Request
 from passlib.context import CryptContext
 import jwt
 import datetime
 import os
 import io
-import tempfile 
+import tempfile
+import json 
 
 # --- 1. SETUP & CONFIG ---
 SECRET_KEY = "your-super-secret-jwt-key"
@@ -134,6 +135,35 @@ class AACLogSchema(BaseModel):
 
 class TTSSchema(BaseModel):
     text: str
+
+class BroadcastSchema(BaseModel):
+    text: str
+    speaker: str = "teacher"
+
+# --- WEBSOCKET CONNECTION MANAGER ---
+class ConnectionManager:
+    def __init__(self):
+        self.active: List[WebSocket] = []
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self.active.append(ws)
+
+    def disconnect(self, ws: WebSocket):
+        if ws in self.active:
+            self.active.remove(ws)
+
+    async def broadcast(self, message: dict):
+        dead = []
+        for ws in self.active:
+            try:
+                await ws.send_text(json.dumps(message))
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.active.remove(ws)
+
+manager = ConnectionManager()
 
 class ProfileUpdateSchema(BaseModel):
     username: str | None = None
@@ -348,6 +378,42 @@ def get_logs(
         }
         for l in logs
     ]
+
+# --- PHASE 4: WEBSOCKET (Live CC) ---
+@app.websocket("/ws/cc")
+async def websocket_cc(websocket: WebSocket, token: str = ""):
+    # Validate token from query param: wss://...onrender.com/ws/cc?token=XXX
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        db = SessionLocal()
+        user = db.query(User).filter(User.id == payload.get("user_id")).first()
+        db.close()
+        if not user:
+            await websocket.close(code=1008)
+            return
+    except Exception:
+        await websocket.close(code=1008)
+        return
+
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # keep connection alive
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+@app.post("/api/broadcast/")
+async def broadcast_to_students(
+    data: BroadcastSchema,
+    current_user: User = Depends(get_current_user)
+):
+    now = datetime.datetime.now().strftime("%H:%M")
+    await manager.broadcast({
+        "text": data.text,
+        "speaker": data.speaker,
+        "time": now,
+    })
+    return {"message": f"Broadcasted to {len(manager.active)} student(s)"}
 
 # --- PHASE 3: TTS (gTTS) ---
 @app.post("/api/tts/")
