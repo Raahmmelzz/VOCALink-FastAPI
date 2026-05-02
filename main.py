@@ -381,9 +381,12 @@ def get_logs(
 
 # --- PHASE 4: WEBSOCKET (Live CC) ---
 @app.websocket("/ws/cc")
-async def websocket_cc(websocket: WebSocket, token: str = ""):
-    # Validate token from query param: wss://...onrender.com/ws/cc?token=XXX
+async def websocket_cc(websocket: WebSocket):
+    # Accept first, then validate token sent as first message
+    await websocket.accept()
     try:
+        # Wait for token as first message
+        token = await websocket.receive_text()
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         db = SessionLocal()
         user = db.query(User).filter(User.id == payload.get("user_id")).first()
@@ -395,7 +398,7 @@ async def websocket_cc(websocket: WebSocket, token: str = ""):
         await websocket.close(code=1008)
         return
 
-    await manager.connect(websocket)
+    manager.active.append(websocket)
     try:
         while True:
             await websocket.receive_text()  # keep connection alive
