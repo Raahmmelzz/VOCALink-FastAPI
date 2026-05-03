@@ -1,34 +1,28 @@
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.responses import StreamingResponse
-<<<<<<< HEAD
-import asyncio
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, text
-=======
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, text, event
->>>>>>> c6266ea09dc40774b74346379b206954930eec1f
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
 from fastapi import Request
-
-
 import requests
 from passlib.context import CryptContext
 import jwt
 import datetime
+import datetime as dt
 import os
 import io
 import tempfile
-import json 
+import json
 
 # --- 1. SETUP & CONFIG ---
 SECRET_KEY = "your-super-secret-jwt-key"
 ALGORITHM = "HS256"
 
 HF_API_URL = "https://api-inference.huggingface.co/models/rammealz123/VOCALink-Mobile-STT"
-# 🚨 Replace this with your actual token:
 HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
+HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./vocalink.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -50,8 +44,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 2. DATABASE MODELS (SQLAlchemy) ---
-import datetime as dt
+# --- 2. DATABASE MODELS ---
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
@@ -59,7 +52,7 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     status = Column(String, default="STUDENT")
-    
+
     teacher_profile = relationship("TeacherProfile", back_populates="user", uselist=False)
     student_profile = relationship("StudentProfile", back_populates="user", uselist=False)
 
@@ -67,26 +60,24 @@ class TeacherProfile(Base):
     __tablename__ = "teacher_profiles"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
-    first_name = Column(String, default="") 
-    last_name = Column(String, default="")  
+    first_name = Column(String, default="")
+    last_name = Column(String, default="")
     display_name = Column(String, default="")
     contact_number = Column(String, default="")
     room_section = Column(String, default="")
     department = Column(String, default="")
-    grade_handled = Column(String, default="") 
-    organization = Column(String, default="")  
+    grade_handled = Column(String, default="")
+    organization = Column(String, default="")
     bio = Column(String, default="")
 
-    user = relationship("User", back_populates="teacher_profile")   
+    user = relationship("User", back_populates="teacher_profile")
     students = relationship("StudentProfile", back_populates="instructor")
 
-# 💥 MOVED THIS UP: Now SQLAlchemy knows about it BEFORE it creates tables!
 class StudentProfile(Base):
     __tablename__ = "student_profiles"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True)
     instructor_id = Column(Integer, ForeignKey("teacher_profiles.id", ondelete="SET NULL"), nullable=True)
-    
     first_name = Column(String, nullable=True)
     last_name = Column(String, nullable=True)
     bio = Column(String, nullable=True)
@@ -105,11 +96,9 @@ class AACLog(Base):
     message = Column(String, nullable=True)
     tapped_at = Column(String, default=lambda: dt.datetime.utcnow().isoformat())
 
-# 💥 Tell the database to build all the tables NOW.
 Base.metadata.create_all(bind=engine)
 
-# 💥 THE BULLETPROOF AUTO-MIGRATION HACK
-# Keeping your awesome hack to add missing columns to existing databases!
+# Auto-migration for missing columns
 columns_to_add_teacher = [
     "first_name VARCHAR DEFAULT ''", "last_name VARCHAR DEFAULT ''",
     "grade_handled VARCHAR DEFAULT ''", "organization VARCHAR DEFAULT ''", "bio VARCHAR DEFAULT ''"
@@ -121,29 +110,22 @@ for column in columns_to_add_teacher:
             conn.commit()
     except Exception:
         pass
-    
-def create_user_profile_listener(mapper, connection, target):
-    # 'target' is the newly created User object
-    if target.status == "TEACHER":
-        # We use connection.execute to safely insert during the event
-        connection.execute(
-            TeacherProfile.__table__.insert().values(user_id=target.id)
-        )
-    elif target.status == "STUDENT":
-        connection.execute(
-            StudentProfile.__table__.insert().values(user_id=target.id)
-        )
 
-# Attach the listener to the User model
+def create_user_profile_listener(mapper, connection, target):
+    if target.status == "TEACHER":
+        connection.execute(TeacherProfile.__table__.insert().values(user_id=target.id))
+    elif target.status == "STUDENT":
+        connection.execute(StudentProfile.__table__.insert().values(user_id=target.id))
+
 event.listen(User, 'after_insert', create_user_profile_listener)
 
-# --- 3. SCHEMAS (Pydantic) ---
+# --- 3. SCHEMAS ---
 class RegisterSchema(BaseModel):
     username: str
     email: EmailStr
     password: str
-    status: str = "TEACHER" # Note: Mobile app currently overrides this to "STUDENT"
-    
+    status: str = "TEACHER"
+
 class ProfileUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
@@ -163,47 +145,17 @@ class AACLogSchema(BaseModel):
 class TTSSchema(BaseModel):
     text: str
 
-class BroadcastSchema(BaseModel):
-    text: str
-    speaker: str = "teacher"
-
-# --- SSE CONNECTION MANAGER ---
-class SSEManager:
-    def __init__(self):
-        self.queues: List[asyncio.Queue] = []
-
-    def add_client(self) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue()
-        self.queues.append(q)
-        return q
-
-    def remove_client(self, q: asyncio.Queue):
-        if q in self.queues:
-            self.queues.remove(q)
-
-    async def broadcast(self, message: dict):
-        dead = []
-        for q in self.queues:
-            try:
-                await q.put(message)
-            except Exception:
-                dead.append(q)
-        for q in dead:
-            self.queues.remove(q)
-
-manager = SSEManager()
-
 class ProfileUpdateSchema(BaseModel):
     username: str | None = None
     email: EmailStr | None = None
-    first_name: str | None = None  
+    first_name: str | None = None
     last_name: str | None = None
     display_name: str | None = None
     contact_number: str | None = None
     room_section: str | None = None
     department: str | None = None
-    grade_handled: str | None = None 
-    organization: str | None = None  
+    grade_handled: str | None = None
+    organization: str | None = None
     bio: str | None = None
 
 # --- 4. DEPENDENCIES & HELPERS ---
@@ -222,11 +174,10 @@ def get_current_user(request: Request, db: Session = Depends(get_db)):
     token = request.headers.get("Authorization")
     if not token or not token.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Not authenticated")
-    
     try:
         payload = jwt.decode(token.split(" ")[1], SECRET_KEY, algorithms=[ALGORITHM])
         user = db.query(User).filter(User.id == payload.get("user_id")).first()
-        if user is None: 
+        if user is None:
             raise HTTPException(status_code=401)
         return user
     except jwt.ExpiredSignatureError:
@@ -234,12 +185,11 @@ def get_current_user(request: Request, db: Session = Depends(get_db)):
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# --- 5. ROUTES ---
+# --- 5. AUTH ROUTES ---
 @app.post("/api/auth/register/")
 def register(data: RegisterSchema, db: Session = Depends(get_db)):
     if db.query(User).filter((User.username == data.username) | (User.email == data.email)).first():
         raise HTTPException(status_code=400, detail="Username or email already taken")
-    
     new_user = User(
         username=data.username,
         email=data.email,
@@ -249,143 +199,57 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
-
-    # 💥 FIXED: Now it automatically builds the CORRECT profile based on status!
     if new_user.status == "TEACHER":
-        profile = TeacherProfile(user_id=new_user.id)
-        db.add(profile)
+        db.add(TeacherProfile(user_id=new_user.id))
     elif new_user.status == "STUDENT":
-        profile = StudentProfile(user_id=new_user.id)
-        db.add(profile)
-        
+        db.add(StudentProfile(user_id=new_user.id))
     db.commit()
     return {"message": "User created successfully"}
 
 @app.post("/api/auth/login/")
 def login(data: LoginSchema, db: Session = Depends(get_db)):
     user = db.query(User).filter((User.username == data.identifier) | (User.email == data.identifier)).first()
-    
     if not user or not pwd_context.verify(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-        
     access_token = create_access_token(data={"user_id": user.id})
-    # 💥 FIXED: Changed "access" to "access_token" to match the React Native code!
     return {"access_token": access_token, "status": user.status}
 
-@app.post("/api/stt/")
-async def speech_to_text(
-    audio: UploadFile = File(...),
-    current_user: User = Depends(get_current_user)
-):
-    # 1. The WAV Bouncer (Keep this!)
-    if not audio.filename.lower().endswith('.wav') and audio.content_type != 'audio/wav':
-        raise HTTPException(
-            status_code=400, 
-            detail="Invalid file format! This AI only accepts .wav audio files."
-        )
-
-    try:
-        audio_bytes = await audio.read()
-        
-        # 2. Try to hit the Cloud AI
-        try:
-            response = requests.post(HF_API_URL, headers=HF_HEADERS, data=audio_bytes, timeout=30)
-        except requests.exceptions.RequestException as e:
-            raise HTTPException(status_code=503, detail=f"Could not reach Hugging Face: {str(e)}")
-
-        output = response.json()
-
-        # 3. Handle the "Model is Loading" state (Free Tier common issue)
-        if response.status_code == 503 or (isinstance(output, dict) and "estimated_time" in output):
-            return {
-                "error": "Model is warming up",
-                "estimated_time": output.get("estimated_time", 20),
-                "message": "The AI is waking up. Please try again in 20 seconds!"
-            }
-
-        # 4. Handle actual errors
-        if response.status_code != 200:
-             raise HTTPException(status_code=response.status_code, detail=f"HF Error: {output}")
-
-        # 5. Success!
-        if isinstance(output, list) and len(output) > 0:
-            return {"text": output[0].get("text", "No transcription available")}
-        
-        return {"text": output.get("text", str(output))}
-
-    except Exception as e:
-        # This catches the error you just saw and provides a real message instead
-        raise HTTPException(status_code=500, detail=f"STT Error: {str(e)}")
-    
 # --- TEACHER ROUTES ---
 @app.get("/api/users/me/")
 def get_me(user: User = Depends(get_current_user)):
-    profile = user.teacher_profile
+    p = user.teacher_profile
     return {
         "username": user.username,
         "email": user.email,
-        "first_name": profile.first_name if profile else "", 
-        "last_name": profile.last_name if profile else "",   
-        "display_name": profile.display_name if profile else "",
-        "contact_number": profile.contact_number if profile else "",
-        "room_section": profile.room_section if profile else "",
-        "department": profile.department if profile else "",
-        "grade_handled": profile.grade_handled if profile else "", 
-        "organization": profile.organization if profile else "",   
-        "bio": profile.bio if profile else "",
+        "first_name": p.first_name if p else "",
+        "last_name": p.last_name if p else "",
+        "display_name": p.display_name if p else "",
+        "contact_number": p.contact_number if p else "",
+        "room_section": p.room_section if p else "",
+        "department": p.department if p else "",
+        "grade_handled": p.grade_handled if p else "",
+        "organization": p.organization if p else "",
+        "bio": p.bio if p else "",
     }
 
 @app.patch("/api/users/me/")
 def update_me(data: ProfileUpdateSchema, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if data.username: user.username = data.username
     if data.email: user.email = data.email
-    
     if user.teacher_profile:
-        if data.first_name is not None: user.teacher_profile.first_name = data.first_name 
-        if data.last_name is not None: user.teacher_profile.last_name = data.last_name   
+        if data.first_name is not None: user.teacher_profile.first_name = data.first_name
+        if data.last_name is not None: user.teacher_profile.last_name = data.last_name
         if data.display_name is not None: user.teacher_profile.display_name = data.display_name
         if data.contact_number is not None: user.teacher_profile.contact_number = data.contact_number
         if data.room_section is not None: user.teacher_profile.room_section = data.room_section
         if data.department is not None: user.teacher_profile.department = data.department
-        if data.grade_handled is not None: user.teacher_profile.grade_handled = data.grade_handled 
-        if data.organization is not None: user.teacher_profile.organization = data.organization    
+        if data.grade_handled is not None: user.teacher_profile.grade_handled = data.grade_handled
+        if data.organization is not None: user.teacher_profile.organization = data.organization
         if data.bio is not None: user.teacher_profile.bio = data.bio
-        
     db.commit()
     return {"message": "Profile updated"}
 
 # --- STUDENT ROUTES ---
-# 💥 FIXED: Added the /api prefix so React Native can find it!
-@app.put("/api/profile/me")
-def update_profile(
-    profile_data: ProfileUpdate, 
-    db: Session = Depends(get_db), 
-    current_user: User = Depends(get_current_user) 
-):
-    profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found")
-
-    if profile_data.first_name is not None: profile.first_name = profile_data.first_name
-    if profile_data.last_name is not None: profile.last_name = profile_data.last_name
-    if profile_data.bio is not None: profile.bio = profile_data.bio
-    if profile_data.grade_level is not None: profile.grade_level = profile_data.grade_level
-    if profile_data.disability_type is not None: profile.disability_type = profile_data.disability_type
-
-    db.commit()
-    return {"message": "Profile updated successfully!"}
-
-# 💥 FIXED: Added the /api prefix so React Native can find it!
-@app.delete("/api/profile/me")
-def delete_account(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    db.delete(current_user)
-    db.commit()
-    return {"message": "Account permanently deleted."}
-
-# --- SHARED PROFILE GET (works for both student and teacher) ---
 @app.get("/api/profile/me")
 def get_profile(current_user: User = Depends(get_current_user)):
     if current_user.status == "TEACHER":
@@ -415,6 +279,32 @@ def get_profile(current_user: User = Depends(get_current_user)):
             "disability_type": p.disability_type if p else "",
             "bio": p.bio if p else "",
         }
+
+@app.put("/api/profile/me")
+def update_profile(
+    profile_data: ProfileUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    if profile_data.first_name is not None: profile.first_name = profile_data.first_name
+    if profile_data.last_name is not None: profile.last_name = profile_data.last_name
+    if profile_data.bio is not None: profile.bio = profile_data.bio
+    if profile_data.grade_level is not None: profile.grade_level = profile_data.grade_level
+    if profile_data.disability_type is not None: profile.disability_type = profile_data.disability_type
+    db.commit()
+    return {"message": "Profile updated successfully!"}
+
+@app.delete("/api/profile/me")
+def delete_account(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    db.delete(current_user)
+    db.commit()
+    return {"message": "Account permanently deleted."}
 
 # --- ICON TAP LOGS ---
 @app.post("/api/logs/")
@@ -452,49 +342,6 @@ def get_logs(
         for l in logs
     ]
 
-# --- PHASE 4: SSE (Live CC) ---
-@app.get("/api/cc/stream")
-async def cc_stream(current_user: User = Depends(get_current_user)):
-    q = manager.add_client()
-
-    async def event_generator():
-        try:
-            # Send a connected ping first
-            yield f"data: {json.dumps({'text': '', 'speaker': 'ping', 'time': ''})}\n\n"
-            while True:
-                try:
-                    message = await asyncio.wait_for(q.get(), timeout=30)
-                    yield f"data: {json.dumps(message)}\n\n"
-                except asyncio.TimeoutError:
-                    # Send keepalive comment every 30s
-                    yield ": keepalive\n\n"
-        except asyncio.CancelledError:
-            pass
-        finally:
-            manager.remove_client(q)
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        }
-    )
-
-@app.post("/api/broadcast/")
-async def broadcast_to_students(
-    data: BroadcastSchema,
-    current_user: User = Depends(get_current_user)
-):
-    now = datetime.datetime.now().strftime("%H:%M")
-    await manager.broadcast({
-        "text": data.text,
-        "speaker": data.speaker,
-        "time": now,
-    })
-    return {"message": f"Broadcasted to {len(manager.active)} student(s)"}
-
 # --- PHASE 3: TTS (gTTS) ---
 @app.post("/api/tts/")
 def text_to_speech(
@@ -515,40 +362,35 @@ def text_to_speech(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}")
 
-# --- PHASE 3: STT (Whisper) ---
-# Lazy-load the model so the server starts fast
-_whisper_model = None
-
-def get_whisper_model():
-    global _whisper_model
-    if _whisper_model is None:
-        from faster_whisper import WhisperModel
-        _whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
-    return _whisper_model
-
-
-"""
+# --- PHASE 3: STT (HuggingFace Whisper) ---
 @app.post("/api/stt/")
 async def speech_to_text(
     audio: UploadFile = File(...),
     current_user: User = Depends(get_current_user)
 ):
+    if not audio.filename.lower().endswith('.wav') and audio.content_type != 'audio/wav':
+        raise HTTPException(status_code=400, detail="Only .wav files accepted.")
     try:
-        # Save uploaded audio to a temp file
-        suffix = os.path.splitext(audio.filename or "audio.wav")[1] or ".wav"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(await audio.read())
-            tmp_path = tmp.name
-
+        audio_bytes = await audio.read()
         try:
-            model = get_whisper_model()
-            segments, _ = model.transcribe(tmp_path, language="en")
-            text = " ".join(seg.text.strip() for seg in segments)
-            return {"text": text.strip()}
-        finally:
-            os.unlink(tmp_path)
+            response = requests.post(HF_API_URL, headers=HF_HEADERS, data=audio_bytes, timeout=30)
+        except requests.exceptions.RequestException as e:
+            raise HTTPException(status_code=503, detail=f"Could not reach Hugging Face: {str(e)}")
+
+        output = response.json()
+
+        if response.status_code == 503 or (isinstance(output, dict) and "estimated_time" in output):
+            return {
+                "error": "Model is warming up",
+                "estimated_time": output.get("estimated_time", 20),
+                "message": "The AI is waking up. Please try again in 20 seconds!"
+            }
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail=f"HF Error: {output}")
+
+        if isinstance(output, list) and len(output) > 0:
+            return {"text": output[0].get("text", "No transcription available")}
+        return {"text": output.get("text", str(output))}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"STT failed: {str(e)}")
-        
-"""
+        raise HTTPException(status_code=500, detail=f"STT Error: {str(e)}")
