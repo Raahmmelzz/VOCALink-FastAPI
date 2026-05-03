@@ -1,5 +1,6 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.responses import StreamingResponse
+import asyncio
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, text
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
@@ -140,30 +141,31 @@ class BroadcastSchema(BaseModel):
     text: str
     speaker: str = "teacher"
 
-# --- WEBSOCKET CONNECTION MANAGER ---
-class ConnectionManager:
+# --- SSE CONNECTION MANAGER ---
+class SSEManager:
     def __init__(self):
-        self.active: List[WebSocket] = []
+        self.queues: List[asyncio.Queue] = []
 
-    async def connect(self, ws: WebSocket):
-        await ws.accept()
-        self.active.append(ws)
+    def add_client(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue()
+        self.queues.append(q)
+        return q
 
-    def disconnect(self, ws: WebSocket):
-        if ws in self.active:
-            self.active.remove(ws)
+    def remove_client(self, q: asyncio.Queue):
+        if q in self.queues:
+            self.queues.remove(q)
 
     async def broadcast(self, message: dict):
         dead = []
-        for ws in self.active:
+        for q in self.queues:
             try:
-                await ws.send_text(json.dumps(message))
+                await q.put(message)
             except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.active.remove(ws)
+                dead.append(q)
+        for q in dead:
+            self.queues.remove(q)
 
-manager = ConnectionManager()
+manager = SSEManager()
 
 class ProfileUpdateSchema(BaseModel):
     username: str | None = None
@@ -379,31 +381,35 @@ def get_logs(
         for l in logs
     ]
 
-# --- PHASE 4: WEBSOCKET (Live CC) ---
-@app.websocket("/ws/cc")
-async def websocket_cc(websocket: WebSocket):
-    # Accept first, then validate token sent as first message
-    await websocket.accept()
-    try:
-        # Wait for token as first message
-        token = await websocket.receive_text()
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        db = SessionLocal()
-        user = db.query(User).filter(User.id == payload.get("user_id")).first()
-        db.close()
-        if not user:
-            await websocket.close(code=1008)
-            return
-    except Exception:
-        await websocket.close(code=1008)
-        return
+# --- PHASE 4: SSE (Live CC) ---
+@app.get("/api/cc/stream")
+async def cc_stream(current_user: User = Depends(get_current_user)):
+    q = manager.add_client()
 
-    manager.active.append(websocket)
-    try:
-        while True:
-            await websocket.receive_text()  # keep connection alive
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
+    async def event_generator():
+        try:
+            # Send a connected ping first
+            yield f"data: {json.dumps({'text': '', 'speaker': 'ping', 'time': ''})}\n\n"
+            while True:
+                try:
+                    message = await asyncio.wait_for(q.get(), timeout=30)
+                    yield f"data: {json.dumps(message)}\n\n"
+                except asyncio.TimeoutError:
+                    # Send keepalive comment every 30s
+                    yield ": keepalive\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            manager.remove_client(q)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        }
+    )
 
 @app.post("/api/broadcast/")
 async def broadcast_to_students(
