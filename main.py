@@ -6,6 +6,9 @@ from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
 from fastapi import Request
+
+
+import requests
 from passlib.context import CryptContext
 import jwt
 import datetime
@@ -17,6 +20,10 @@ import json
 # --- 1. SETUP & CONFIG ---
 SECRET_KEY = "your-super-secret-jwt-key"
 ALGORITHM = "HS256"
+
+HF_API_URL = "https://api-inference.huggingface.co/models/rammealz123/VOCALink-Mobile-STT"
+# 🚨 Replace this with your actual token:
+HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./vocalink.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -109,6 +116,21 @@ for column in columns_to_add_teacher:
             conn.commit()
     except Exception:
         pass
+    
+def create_user_profile_listener(mapper, connection, target):
+    # 'target' is the newly created User object
+    if target.status == "TEACHER":
+        # We use connection.execute to safely insert during the event
+        connection.execute(
+            TeacherProfile.__table__.insert().values(user_id=target.id)
+        )
+    elif target.status == "STUDENT":
+        connection.execute(
+            StudentProfile.__table__.insert().values(user_id=target.id)
+        )
+
+# Attach the listener to the User model
+event.listen(User, 'after_insert', create_user_profile_listener)
 
 # --- 3. SCHEMAS (Pydantic) ---
 class RegisterSchema(BaseModel):
@@ -244,6 +266,51 @@ def login(data: LoginSchema, db: Session = Depends(get_db)):
     # 💥 FIXED: Changed "access" to "access_token" to match the React Native code!
     return {"access_token": access_token, "status": user.status}
 
+@app.post("/api/stt/")
+async def speech_to_text(
+    audio: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    # 1. The WAV Bouncer (Keep this!)
+    if not audio.filename.lower().endswith('.wav') and audio.content_type != 'audio/wav':
+        raise HTTPException(
+            status_code=400, 
+            detail="Invalid file format! This AI only accepts .wav audio files."
+        )
+
+    try:
+        audio_bytes = await audio.read()
+        
+        # 2. Try to hit the Cloud AI
+        try:
+            response = requests.post(HF_API_URL, headers=HF_HEADERS, data=audio_bytes, timeout=30)
+        except requests.exceptions.RequestException as e:
+            raise HTTPException(status_code=503, detail=f"Could not reach Hugging Face: {str(e)}")
+
+        output = response.json()
+
+        # 3. Handle the "Model is Loading" state (Free Tier common issue)
+        if response.status_code == 503 or (isinstance(output, dict) and "estimated_time" in output):
+            return {
+                "error": "Model is warming up",
+                "estimated_time": output.get("estimated_time", 20),
+                "message": "The AI is waking up. Please try again in 20 seconds!"
+            }
+
+        # 4. Handle actual errors
+        if response.status_code != 200:
+             raise HTTPException(status_code=response.status_code, detail=f"HF Error: {output}")
+
+        # 5. Success!
+        if isinstance(output, list) and len(output) > 0:
+            return {"text": output[0].get("text", "No transcription available")}
+        
+        return {"text": output.get("text", str(output))}
+
+    except Exception as e:
+        # This catches the error you just saw and provides a real message instead
+        raise HTTPException(status_code=500, detail=f"STT Error: {str(e)}")
+    
 # --- TEACHER ROUTES ---
 @app.get("/api/users/me/")
 def get_me(user: User = Depends(get_current_user)):
@@ -449,6 +516,8 @@ def get_whisper_model():
         _whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
     return _whisper_model
 
+
+"""
 @app.post("/api/stt/")
 async def speech_to_text(
     audio: UploadFile = File(...),
@@ -471,3 +540,5 @@ async def speech_to_text(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"STT failed: {str(e)}")
+        
+"""
