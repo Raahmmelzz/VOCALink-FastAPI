@@ -28,11 +28,8 @@ HF_API_URL = "https://api-inference.huggingface.co/models/rammealz123/VOCALink-M
 HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
 HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 
-# Email config — set these in Render environment variables
 SMTP_EMAIL    = os.getenv("SMTP_EMAIL", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-
-# In-memory OTP store: { email: { otp, expires_at } }
 otp_store: dict = {}
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./vocalink.db")
@@ -40,7 +37,6 @@ if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-
 engine = create_engine(DATABASE_URL, connect_args=connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -63,7 +59,6 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     status = Column(String, default="STUDENT")
-
     teacher_profile = relationship("TeacherProfile", back_populates="user", uselist=False)
     student_profile = relationship("StudentProfile", back_populates="user", uselist=False)
 
@@ -80,7 +75,6 @@ class TeacherProfile(Base):
     grade_handled = Column(String, default="")
     organization = Column(String, default="")
     bio = Column(String, default="")
-
     user = relationship("User", back_populates="teacher_profile")
     students = relationship("StudentProfile", back_populates="instructor")
 
@@ -94,7 +88,6 @@ class StudentProfile(Base):
     bio = Column(String, nullable=True)
     grade_level = Column(String, nullable=True)
     disability_type = Column(String, nullable=True)
-
     instructor = relationship("TeacherProfile", back_populates="students")
     user = relationship("User", back_populates="student_profile")
 
@@ -116,7 +109,7 @@ class CCMessage(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# Auto-migration for missing columns
+# --- AUTO-MIGRATION ---
 columns_to_add_teacher = [
     "first_name VARCHAR DEFAULT ''", "last_name VARCHAR DEFAULT ''",
     "grade_handled VARCHAR DEFAULT ''", "organization VARCHAR DEFAULT ''", "bio VARCHAR DEFAULT ''"
@@ -233,57 +226,46 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
-    if new_user.status == "TEACHER":
-        db.add(TeacherProfile(user_id=new_user.id))
-    elif new_user.status == "STUDENT":
-        db.add(StudentProfile(user_id=new_user.id))
-    db.commit()
     return {"message": "User created successfully"}
 
 @app.post("/api/auth/login/")
 def login(data: LoginSchema, db: Session = Depends(get_db)):
-    user = db.query(User).filter((User.username == data.identifier) | (User.email == data.identifier)).first()
+    user = db.query(User).filter(
+        (User.username == data.identifier) | (User.email == data.identifier)
+    ).first()
     if not user or not pwd_context.verify(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     access_token = create_access_token(data={"user_id": user.id})
     return {"access_token": access_token, "status": user.status}
 
-# --- FORGOT PASSWORD (OTP via Email) ---
+# --- FORGOT PASSWORD (OTP) ---
 @app.post("/api/auth/forgot-password/")
 def forgot_password(data: ForgotPasswordSchema, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == data.email).first()
     if not user:
-        # Don't reveal whether email exists
         return {"message": "If that email exists, an OTP has been sent."}
-
-    # Generate 6-digit OTP
     otp = str(random.randint(100000, 999999))
     expires = dt.datetime.utcnow() + dt.timedelta(minutes=10)
     otp_store[data.email] = {"otp": otp, "expires_at": expires}
-
-    # Send email
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = "VocaLink Password Reset OTP"
         msg["From"]    = SMTP_EMAIL
         msg["To"]      = data.email
-
         html = f"""
         <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f9f9f9;border-radius:12px">
           <h2 style="color:#1AADDC">VocaLink — Password Reset</h2>
           <p>Your one-time password (OTP) is:</p>
           <div style="font-size:36px;font-weight:800;letter-spacing:8px;color:#1A1A2E;padding:16px 0">{otp}</div>
-          <p style="color:#6B7280;font-size:13px">This OTP expires in <strong>10 minutes</strong>. Do not share it with anyone.</p>
+          <p style="color:#6B7280;font-size:13px">This OTP expires in <strong>10 minutes</strong>.</p>
         </div>
         """
         msg.attach(MIMEText(html, "html"))
-
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(SMTP_EMAIL, SMTP_PASSWORD)
             server.sendmail(SMTP_EMAIL, data.email, msg.as_string())
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
-
     return {"message": "OTP sent to your email."}
 
 @app.post("/api/auth/verify-otp/")
@@ -293,28 +275,25 @@ def verify_otp(data: VerifyOTPSchema):
         raise HTTPException(status_code=400, detail="No OTP found. Please request a new one.")
     if dt.datetime.utcnow() > record["expires_at"]:
         otp_store.pop(data.email, None)
-        raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
+        raise HTTPException(status_code=400, detail="OTP has expired.")
     if record["otp"] != data.otp:
         raise HTTPException(status_code=400, detail="Invalid OTP.")
     return {"message": "OTP verified."}
 
 @app.post("/api/auth/reset-password/")
 def reset_password(data: ResetPasswordSchema, db: Session = Depends(get_db)):
-    # Verify OTP one more time
     record = otp_store.get(data.email)
     if not record or record["otp"] != data.otp or dt.datetime.utcnow() > record["expires_at"]:
         raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
-
     user = db.query(User).filter(User.email == data.email).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
-
     user.hashed_password = pwd_context.hash(data.new_password)
     db.commit()
     otp_store.pop(data.email, None)
     return {"message": "Password reset successfully."}
 
-# --- TEACHER ROUTES ---
+# --- TEACHER PROFILE ---
 @app.get("/api/users/me/")
 def get_me(user: User = Depends(get_current_user)):
     p = user.teacher_profile
@@ -349,7 +328,7 @@ def update_me(data: ProfileUpdateSchema, user: User = Depends(get_current_user),
     db.commit()
     return {"message": "Profile updated"}
 
-# --- STUDENT ROUTES ---
+# --- STUDENT PROFILE ---
 @app.get("/api/profile/me")
 def get_profile(current_user: User = Depends(get_current_user)):
     if current_user.status == "TEACHER":
@@ -368,7 +347,6 @@ def get_profile(current_user: User = Depends(get_current_user)):
         }
     else:
         p = current_user.student_profile
-        # Get teacher info if assigned
         teacher_name = ""
         if p and p.instructor:
             t = p.instructor
@@ -385,34 +363,6 @@ def get_profile(current_user: User = Depends(get_current_user)):
             "bio": p.bio if p else "",
             "teacher_name": teacher_name,
         }
-
-@app.get("/api/teacher/logs/")
-def get_teacher_logs(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Get icon tap logs for all students assigned to this teacher."""
-    if current_user.status != "TEACHER":
-        raise HTTPException(status_code=403, detail="Teachers only.")
-    profile = current_user.teacher_profile
-    if not profile:
-        return []
-    student_ids = [s.user_id for s in profile.students]
-    if not student_ids:
-        return []
-    logs = db.query(AACLog).filter(AACLog.user_id.in_(student_ids))\
-              .order_by(AACLog.id.desc()).limit(100).all()
-    return [
-        {
-            "id": l.id,
-            "user_id": l.user_id,
-            "icon_id": l.icon_id,
-            "icon_label": l.icon_label,
-            "message": l.message,
-            "tapped_at": l.tapped_at,
-        }
-        for l in logs
-    ]
 
 @app.put("/api/profile/me")
 def update_profile(
@@ -432,21 +382,68 @@ def update_profile(
     return {"message": "Profile updated successfully!"}
 
 @app.delete("/api/profile/me")
-def delete_account(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def delete_account(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     db.delete(current_user)
     db.commit()
     return {"message": "Account permanently deleted."}
 
+# --- STUDENT MANAGEMENT (Teacher) ---
+@app.get("/api/teacher/students/")
+def get_my_students(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Teachers only")
+    profile = current_user.teacher_profile
+    if not profile:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+    return [
+        {
+            "id": s.user_id,
+            "username": s.user.username,
+            "first_name": s.first_name or "",
+            "last_name": s.last_name or "",
+        }
+        for s in profile.students
+    ]
+
+@app.get("/api/users/all-students/")
+def get_all_students(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Teachers only")
+    students = db.query(StudentProfile).join(User).all()
+    return [
+        {
+            "id": s.user_id,
+            "username": s.user.username,
+            "first_name": s.first_name or "",
+            "last_name": s.last_name or "",
+            "assigned": s.instructor_id is not None,
+        }
+        for s in students
+    ]
+
+@app.post("/api/teacher/students/{user_id}")
+def add_student_to_class(user_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Teachers only")
+    student = db.query(StudentProfile).filter(StudentProfile.user_id == user_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    student.instructor_id = current_user.teacher_profile.id
+    db.commit()
+    return {"message": "Student added to class"}
+
+@app.delete("/api/teacher/students/{user_id}")
+def remove_student_from_class(user_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    student = db.query(StudentProfile).filter(StudentProfile.user_id == user_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    student.instructor_id = None
+    db.commit()
+    return {"message": "Student removed"}
+
 # --- ICON TAP LOGS ---
 @app.post("/api/logs/")
-def log_icon_tap(
-    data: AACLogSchema,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def log_icon_tap(data: AACLogSchema, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     log = AACLog(
         user_id=current_user.id,
         icon_id=data.icon_id,
@@ -459,50 +456,28 @@ def log_icon_tap(
     return {"message": "Log saved."}
 
 @app.get("/api/logs/")
-def get_logs(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def get_logs(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     logs = db.query(AACLog).filter(AACLog.user_id == current_user.id)\
               .order_by(AACLog.id.desc()).limit(50).all()
-    return [
-        {
-            "id": l.id,
-            "icon_id": l.icon_id,
-            "icon_label": l.icon_label,
-            "message": l.message,
-            "tapped_at": l.tapped_at,
-        }
-        for l in logs
-    ]
+    return [{"id": l.id, "icon_id": l.icon_id, "icon_label": l.icon_label, "message": l.message, "tapped_at": l.tapped_at} for l in logs]
 
-# --- PHASE 3: TTS (gTTS) ---
-@app.post("/api/tts/")
-def text_to_speech(
-    data: TTSSchema,
-    current_user: User = Depends(get_current_user)
-):
-    try:
-        from gtts import gTTS
-        tts = gTTS(text=data.text, lang='en')
-        buf = io.BytesIO()
-        tts.write_to_fp(buf)
-        buf.seek(0)
-        return StreamingResponse(
-            buf,
-            media_type="audio/mpeg",
-            headers={"Content-Disposition": "inline; filename=tts.mp3"}
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}")
+@app.get("/api/teacher/logs/")
+def get_teacher_logs(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Teachers only.")
+    profile = current_user.teacher_profile
+    if not profile:
+        return []
+    student_ids = [s.user_id for s in profile.students]
+    if not student_ids:
+        return []
+    logs = db.query(AACLog).filter(AACLog.user_id.in_(student_ids))\
+              .order_by(AACLog.id.desc()).limit(100).all()
+    return [{"id": l.id, "user_id": l.user_id, "icon_id": l.icon_id, "icon_label": l.icon_label, "message": l.message, "tapped_at": l.tapped_at} for l in logs]
 
-# --- PHASE 4: BROADCAST + POLL (Live CC) ---
+# --- BROADCAST + POLL (Live CC) ---
 @app.post("/api/broadcast/")
-def broadcast_message(
-    data: BroadcastSchema,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def broadcast_message(data: BroadcastSchema, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     now = dt.datetime.utcnow().strftime("%H:%M")
     msg = CCMessage(text=data.text, speaker=data.speaker, sent_at=now)
     db.add(msg)
@@ -511,24 +486,27 @@ def broadcast_message(
     return {"id": msg.id, "message": "Broadcasted successfully"}
 
 @app.get("/api/cc/messages/")
-def get_cc_messages(
-    since: int = 0,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def get_cc_messages(since: int = 0, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     msgs = db.query(CCMessage).filter(CCMessage.id > since)\
              .order_by(CCMessage.id.asc()).limit(20).all()
-    return [
-        {"id": m.id, "text": m.text, "speaker": m.speaker, "time": m.sent_at}
-        for m in msgs
-    ]
+    return [{"id": m.id, "text": m.text, "speaker": m.speaker, "time": m.sent_at} for m in msgs]
 
-# --- PHASE 3: STT (HuggingFace Whisper) ---
+# --- TTS (gTTS) ---
+@app.post("/api/tts/")
+def text_to_speech(data: TTSSchema, current_user: User = Depends(get_current_user)):
+    try:
+        from gtts import gTTS
+        tts = gTTS(text=data.text, lang='en')
+        buf = io.BytesIO()
+        tts.write_to_fp(buf)
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="audio/mpeg", headers={"Content-Disposition": "inline; filename=tts.mp3"})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}")
+
+# --- STT (HuggingFace Whisper) ---
 @app.post("/api/stt/")
-async def speech_to_text(
-    audio: UploadFile = File(...),
-    current_user: User = Depends(get_current_user)
-):
+async def speech_to_text(audio: UploadFile = File(...), current_user: User = Depends(get_current_user)):
     if not audio.filename.lower().endswith('.wav') and audio.content_type != 'audio/wav':
         raise HTTPException(status_code=400, detail="Only .wav files accepted.")
     try:
@@ -537,21 +515,13 @@ async def speech_to_text(
             response = requests.post(HF_API_URL, headers=HF_HEADERS, data=audio_bytes, timeout=30)
         except requests.exceptions.RequestException as e:
             raise HTTPException(status_code=503, detail=f"Could not reach Hugging Face: {str(e)}")
-
         output = response.json()
-
         if response.status_code == 503 or (isinstance(output, dict) and "estimated_time" in output):
-            return {
-                "error": "Model is warming up",
-                "estimated_time": output.get("estimated_time", 20),
-                "message": "The AI is waking up. Please try again in 20 seconds!"
-            }
+            return {"error": "Model is warming up", "estimated_time": output.get("estimated_time", 20), "message": "Try again in 20 seconds!"}
         if response.status_code != 200:
             raise HTTPException(status_code=response.status_code, detail=f"HF Error: {output}")
-
         if isinstance(output, list) and len(output) > 0:
             return {"text": output[0].get("text", "No transcription available")}
         return {"text": output.get("text", str(output))}
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"STT Error: {str(e)}")
