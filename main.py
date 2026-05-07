@@ -15,6 +15,10 @@ import os
 import io
 import tempfile
 import json
+import random
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # --- 1. SETUP & CONFIG ---
 SECRET_KEY = "your-super-secret-jwt-key"
@@ -23,6 +27,13 @@ ALGORITHM = "HS256"
 HF_API_URL = "https://api-inference.huggingface.co/models/rammealz123/VOCALink-Mobile-STT"
 HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
 HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
+
+# Email config — set these in Render environment variables
+SMTP_EMAIL    = os.getenv("SMTP_EMAIL", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+
+# In-memory OTP store: { email: { otp, expires_at } }
+otp_store: dict = {}
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./vocalink.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -156,6 +167,18 @@ class BroadcastSchema(BaseModel):
     text: str
     speaker: str = "teacher"
 
+class ForgotPasswordSchema(BaseModel):
+    email: str
+
+class VerifyOTPSchema(BaseModel):
+    email: str
+    otp: str
+
+class ResetPasswordSchema(BaseModel):
+    email: str
+    otp: str
+    new_password: str
+
 class ProfileUpdateSchema(BaseModel):
     username: str | None = None
     email: EmailStr | None = None
@@ -225,6 +248,72 @@ def login(data: LoginSchema, db: Session = Depends(get_db)):
     access_token = create_access_token(data={"user_id": user.id})
     return {"access_token": access_token, "status": user.status}
 
+# --- FORGOT PASSWORD (OTP via Email) ---
+@app.post("/api/auth/forgot-password/")
+def forgot_password(data: ForgotPasswordSchema, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == data.email).first()
+    if not user:
+        # Don't reveal whether email exists
+        return {"message": "If that email exists, an OTP has been sent."}
+
+    # Generate 6-digit OTP
+    otp = str(random.randint(100000, 999999))
+    expires = dt.datetime.utcnow() + dt.timedelta(minutes=10)
+    otp_store[data.email] = {"otp": otp, "expires_at": expires}
+
+    # Send email
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = "VocaLink Password Reset OTP"
+        msg["From"]    = SMTP_EMAIL
+        msg["To"]      = data.email
+
+        html = f"""
+        <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f9f9f9;border-radius:12px">
+          <h2 style="color:#1AADDC">VocaLink — Password Reset</h2>
+          <p>Your one-time password (OTP) is:</p>
+          <div style="font-size:36px;font-weight:800;letter-spacing:8px;color:#1A1A2E;padding:16px 0">{otp}</div>
+          <p style="color:#6B7280;font-size:13px">This OTP expires in <strong>10 minutes</strong>. Do not share it with anyone.</p>
+        </div>
+        """
+        msg.attach(MIMEText(html, "html"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(SMTP_EMAIL, SMTP_PASSWORD)
+            server.sendmail(SMTP_EMAIL, data.email, msg.as_string())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+
+    return {"message": "OTP sent to your email."}
+
+@app.post("/api/auth/verify-otp/")
+def verify_otp(data: VerifyOTPSchema):
+    record = otp_store.get(data.email)
+    if not record:
+        raise HTTPException(status_code=400, detail="No OTP found. Please request a new one.")
+    if dt.datetime.utcnow() > record["expires_at"]:
+        otp_store.pop(data.email, None)
+        raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
+    if record["otp"] != data.otp:
+        raise HTTPException(status_code=400, detail="Invalid OTP.")
+    return {"message": "OTP verified."}
+
+@app.post("/api/auth/reset-password/")
+def reset_password(data: ResetPasswordSchema, db: Session = Depends(get_db)):
+    # Verify OTP one more time
+    record = otp_store.get(data.email)
+    if not record or record["otp"] != data.otp or dt.datetime.utcnow() > record["expires_at"]:
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
+
+    user = db.query(User).filter(User.email == data.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    user.hashed_password = pwd_context.hash(data.new_password)
+    db.commit()
+    otp_store.pop(data.email, None)
+    return {"message": "Password reset successfully."}
+
 # --- TEACHER ROUTES ---
 @app.get("/api/users/me/")
 def get_me(user: User = Depends(get_current_user)):
@@ -279,6 +368,11 @@ def get_profile(current_user: User = Depends(get_current_user)):
         }
     else:
         p = current_user.student_profile
+        # Get teacher info if assigned
+        teacher_name = ""
+        if p and p.instructor:
+            t = p.instructor
+            teacher_name = f"{t.first_name} {t.last_name}".strip() or t.display_name or ""
         return {
             "id": current_user.id,
             "username": current_user.username,
@@ -289,7 +383,36 @@ def get_profile(current_user: User = Depends(get_current_user)):
             "grade_level": p.grade_level if p else "",
             "disability_type": p.disability_type if p else "",
             "bio": p.bio if p else "",
+            "teacher_name": teacher_name,
         }
+
+@app.get("/api/teacher/logs/")
+def get_teacher_logs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get icon tap logs for all students assigned to this teacher."""
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Teachers only.")
+    profile = current_user.teacher_profile
+    if not profile:
+        return []
+    student_ids = [s.user_id for s in profile.students]
+    if not student_ids:
+        return []
+    logs = db.query(AACLog).filter(AACLog.user_id.in_(student_ids))\
+              .order_by(AACLog.id.desc()).limit(100).all()
+    return [
+        {
+            "id": l.id,
+            "user_id": l.user_id,
+            "icon_id": l.icon_id,
+            "icon_label": l.icon_label,
+            "message": l.message,
+            "tapped_at": l.tapped_at,
+        }
+        for l in logs
+    ]
 
 @app.put("/api/profile/me")
 def update_profile(
