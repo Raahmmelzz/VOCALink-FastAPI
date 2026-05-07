@@ -96,6 +96,13 @@ class AACLog(Base):
     message = Column(String, nullable=True)
     tapped_at = Column(String, default=lambda: dt.datetime.utcnow().isoformat())
 
+class CCMessage(Base):
+    __tablename__ = "cc_messages"
+    id = Column(Integer, primary_key=True, index=True)
+    text = Column(String)
+    speaker = Column(String, default="teacher")
+    sent_at = Column(String, default=lambda: dt.datetime.utcnow().isoformat())
+
 Base.metadata.create_all(bind=engine)
 
 # Auto-migration for missing columns
@@ -144,6 +151,10 @@ class AACLogSchema(BaseModel):
 
 class TTSSchema(BaseModel):
     text: str
+
+class BroadcastSchema(BaseModel):
+    text: str
+    speaker: str = "teacher"
 
 class ProfileUpdateSchema(BaseModel):
     username: str | None = None
@@ -361,6 +372,33 @@ def text_to_speech(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}")
+
+# --- PHASE 4: BROADCAST + POLL (Live CC) ---
+@app.post("/api/broadcast/")
+def broadcast_message(
+    data: BroadcastSchema,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    now = dt.datetime.utcnow().strftime("%H:%M")
+    msg = CCMessage(text=data.text, speaker=data.speaker, sent_at=now)
+    db.add(msg)
+    db.commit()
+    db.refresh(msg)
+    return {"id": msg.id, "message": "Broadcasted successfully"}
+
+@app.get("/api/cc/messages/")
+def get_cc_messages(
+    since: int = 0,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    msgs = db.query(CCMessage).filter(CCMessage.id > since)\
+             .order_by(CCMessage.id.asc()).limit(20).all()
+    return [
+        {"id": m.id, "text": m.text, "speaker": m.speaker, "time": m.sent_at}
+        for m in msgs
+    ]
 
 # --- PHASE 3: STT (HuggingFace Whisper) ---
 @app.post("/api/stt/")
