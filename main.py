@@ -274,7 +274,7 @@ async def websocket_status(websocket: WebSocket, db: Session = Depends(get_db)):
     except:
         if user_id: await manager.disconnect(user_id, db)
 
-# AUTH ROUTES
+# --- AUTH ROUTES ---
 @app.post("/api/auth/register/")
 def register(data: RegisterSchema, db: Session = Depends(get_db)):
     if db.query(User).filter((User.username == data.username) | (User.email == data.email)).first():
@@ -290,36 +290,41 @@ def login(data: LoginSchema, db: Session = Depends(get_db)):
     user = db.query(User).filter((User.username == data.identifier) | (User.email == data.identifier)).first()
     if not user or not pwd_context.verify(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    
     user.is_online = True
     db.commit()
+    
     access_token = create_access_token(data={"user_id": user.id})
     return {"access_token": access_token, "status": user.status}
 
-# FORGOT PASSWORD (OTP)
+# --- FORGOT PASSWORD ---
 @app.post("/api/auth/forgot-password/")
 def forgot_password(data: ForgotPasswordSchema, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == data.email).first()
-    if not user: return {"message": "Email sent if exists."}
+    if not user: return {"message": "If that email exists, an OTP has been sent."}
     otp = str(random.randint(100000, 999999))
     expires = dt.datetime.utcnow() + dt.timedelta(minutes=10)
     otp_store[data.email] = {"otp": otp, "expires_at": expires}
     try:
         msg = MIMEMultipart("alternative")
-        msg["Subject"] = "VocaLink OTP"; msg["From"] = SMTP_EMAIL; msg["To"] = data.email
-        html = f"<div style='font-family:sans-serif;padding:20px;'><h2>OTP: {otp}</h2></div>"
+        msg["Subject"] = "VocaLink OTP"
+        msg["From"]    = SMTP_EMAIL
+        msg["To"]      = data.email
+        html = f"<div><h2>OTP: {otp}</h2></div>"
         msg.attach(MIMEText(html, "html"))
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(SMTP_EMAIL, SMTP_PASSWORD)
             server.sendmail(SMTP_EMAIL, data.email, msg.as_string())
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
-    return {"message": "OTP sent"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+    return {"message": "OTP sent to your email."}
 
 @app.post("/api/auth/verify-otp/")
 def verify_otp(data: VerifyOTPSchema):
     record = otp_store.get(data.email)
     if not record or record["otp"] != data.otp or dt.datetime.utcnow() > record["expires_at"]:
-        raise HTTPException(status_code=400, detail="Invalid/Expired OTP")
-    return {"message": "Verified"}
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
+    return {"message": "OTP verified."}
 
 @app.post("/api/auth/reset-password/")
 def reset_password(data: ResetPasswordSchema, db: Session = Depends(get_db)):
@@ -327,9 +332,43 @@ def reset_password(data: ResetPasswordSchema, db: Session = Depends(get_db)):
     if not user: raise HTTPException(status_code=404)
     user.hashed_password = pwd_context.hash(data.new_password)
     db.commit()
-    return {"message": "Success"}
+    return {"message": "Password reset successfully."}
 
-# MESSAGES & SYNC
+# --- STUDENT MANAGEMENT ---
+@app.get("/api/users/all-students/")
+def get_all_students(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.status != "TEACHER": raise HTTPException(status_code=403)
+    # This specifically fetches all users with STUDENT status
+    students = db.query(StudentProfile).join(User).filter(User.status == "STUDENT").all()
+    return [
+        {
+            "id": s.user_id,
+            "username": s.user.username,
+            "first_name": s.first_name or "",
+            "last_name": s.last_name or "",
+            "assigned": s.instructor_id is not None,
+            "status": "online" if s.user.is_online else "offline"
+        }
+        for s in students
+    ]
+
+@app.get("/api/teacher/students/")
+def get_my_students(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.status != "TEACHER": raise HTTPException(status_code=403)
+    profile = current_user.teacher_profile
+    if not profile: return []
+    return [
+        {
+            "id": s.user_id,
+            "username": s.user.username,
+            "first_name": s.first_name or "",
+            "last_name": s.last_name or "",
+            "status": "online" if s.user.is_online else "offline"
+        }
+        for s in profile.students
+    ]
+
+# --- MESSAGES ---
 @app.get("/api/messages/{target_id}")
 def get_chat_history(target_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     messages = db.query(ChatMessage).filter(
@@ -341,14 +380,16 @@ def get_chat_history(target_id: int, db: Session = Depends(get_db), current_user
 @app.post("/api/messages/")
 async def send_chat_message(data: ChatMessageCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     new_msg = ChatMessage(sender_id=current_user.id, receiver_id=data.receiver_id, text=data.text)
-    db.add(new_msg); db.commit()
+    db.add(new_msg)
+    db.commit()
     await manager.send_personal_message({
-        "type": "NEW_MESSAGE", "sender_id": current_user.id, "text": data.text,
+        "type": "NEW_MESSAGE",
+        "sender_id": current_user.id,
+        "text": data.text,
         "time": dt.datetime.utcnow().strftime("%H:%M")
     }, data.receiver_id)
     return {"message": "Sent"}
 
-# AAC LOGS & REAL-TIME SYNC
 @app.post("/api/logs/")
 async def log_and_message_aac(data: AACLogSchema, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     log = AACLog(user_id=current_user.id, icon_id=data.icon_id, icon_label=data.icon_label, message=data.message)
@@ -363,9 +404,10 @@ async def log_and_message_aac(data: AACLogSchema, db: Session = Depends(get_db),
             "type": "NEW_MESSAGE", "sender_id": current_user.id, "text": text_content,
             "is_aac": True, "time": dt.datetime.utcnow().strftime("%H:%M")
         }, teacher_user_id)
-    db.commit(); return {"message": "Success"}
+    db.commit()
+    return {"message": "Log saved and sent to teacher"}
 
-# STUDENT PROFILE (PUT FIX)
+# --- PROFILE (PUT FIX) ---
 @app.put("/api/profile/me")
 def update_profile(profile_data: ProfileUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
@@ -375,33 +417,31 @@ def update_profile(profile_data: ProfileUpdate, db: Session = Depends(get_db), c
     if profile_data.bio is not None: profile.bio = profile_data.bio
     if profile_data.grade_level is not None: profile.grade_level = profile_data.grade_level
     if profile_data.disability_type is not None: profile.disability_type = profile_data.disability_type
-    db.commit(); return {"message": "Updated"}
+    db.commit()
+    return {"message": "Profile updated successfully!"}
 
-# TEACHER STUDENT LIST (FIXED)
-@app.get("/api/teacher/students/")
-def get_my_students(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if current_user.status != "TEACHER": raise HTTPException(status_code=403)
-    teacher_profile = current_user.teacher_profile
-    if not teacher_profile: return []
-    return [{"id": s.user_id, "username": s.user.username, "first_name": s.first_name or "", "status": "online" if s.user.is_online else "offline"} for s in teacher_profile.students]
-
-# BROADCAST & CC
+# --- BROADCAST & CC ---
 @app.post("/api/broadcast/")
 def broadcast_message(data: BroadcastSchema, db: Session = Depends(get_db)):
     now = dt.datetime.utcnow().strftime("%H:%M")
     msg = CCMessage(text=data.text, speaker=data.speaker, sent_at=now)
-    db.add(msg); db.commit(); return {"message": "Broadcasted"}
+    db.add(msg)
+    db.commit()
+    return {"message": "Broadcasted successfully"}
 
 @app.get("/api/cc/messages/")
 def get_cc_messages(since: int = 0, db: Session = Depends(get_db)):
-    return db.query(CCMessage).filter(CCMessage.id > since).order_by(CCMessage.id.asc()).limit(20).all()
+    msgs = db.query(CCMessage).filter(CCMessage.id > since).order_by(CCMessage.id.asc()).limit(20).all()
+    return msgs
 
-# TTS & STT
+# --- TTS & STT ---
 @app.post("/api/tts/")
 def text_to_speech(data: TTSSchema):
     from gtts import gTTS
     tts = gTTS(text=data.text, lang='en')
-    buf = io.BytesIO(); tts.write_to_fp(buf); buf.seek(0)
+    buf = io.BytesIO()
+    tts.write_to_fp(buf)
+    buf.seek(0)
     return StreamingResponse(buf, media_type="audio/mpeg")
 
 @app.post("/api/stt/")
