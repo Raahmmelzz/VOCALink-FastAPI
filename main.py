@@ -280,9 +280,7 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
     if db.query(User).filter((User.username == data.username) | (User.email == data.email)).first():
         raise HTTPException(status_code=400, detail="Username or email already taken")
     new_user = User(username=data.username, email=data.email, hashed_password=pwd_context.hash(data.password), status=data.status)
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
+    db.add(new_user); db.commit(); db.refresh(new_user)
     return {"message": "User created successfully"}
 
 @app.post("/api/auth/login/")
@@ -290,10 +288,7 @@ def login(data: LoginSchema, db: Session = Depends(get_db)):
     user = db.query(User).filter((User.username == data.identifier) | (User.email == data.identifier)).first()
     if not user or not pwd_context.verify(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    user.is_online = True
-    db.commit()
-    
+    user.is_online = True; db.commit()
     access_token = create_access_token(data={"user_id": user.id})
     return {"access_token": access_token, "status": user.status}
 
@@ -307,17 +302,14 @@ def forgot_password(data: ForgotPasswordSchema, db: Session = Depends(get_db)):
     otp_store[data.email] = {"otp": otp, "expires_at": expires}
     try:
         msg = MIMEMultipart("alternative")
-        msg["Subject"] = "VocaLink OTP"
-        msg["From"]    = SMTP_EMAIL
-        msg["To"]      = data.email
+        msg["Subject"] = "VocaLink OTP"; msg["From"] = SMTP_EMAIL; msg["To"] = data.email
         html = f"<div><h2>OTP: {otp}</h2></div>"
         msg.attach(MIMEText(html, "html"))
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(SMTP_EMAIL, SMTP_PASSWORD)
             server.sendmail(SMTP_EMAIL, data.email, msg.as_string())
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
-    return {"message": "OTP sent to your email."}
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+    return {"message": "OTP sent"}
 
 @app.post("/api/auth/verify-otp/")
 def verify_otp(data: VerifyOTPSchema):
@@ -330,84 +322,95 @@ def verify_otp(data: VerifyOTPSchema):
 def reset_password(data: ResetPasswordSchema, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == data.email).first()
     if not user: raise HTTPException(status_code=404)
-    user.hashed_password = pwd_context.hash(data.new_password)
-    db.commit()
+    user.hashed_password = pwd_context.hash(data.new_password); db.commit()
     return {"message": "Password reset successfully."}
 
 # --- STUDENT MANAGEMENT ---
 @app.get("/api/users/all-students/")
 def get_all_students(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if current_user.status != "TEACHER": raise HTTPException(status_code=403)
-    # This specifically fetches all users with STUDENT status
     students = db.query(StudentProfile).join(User).filter(User.status == "STUDENT").all()
-    return [
-        {
-            "id": s.user_id,
-            "username": s.user.username,
-            "first_name": s.first_name or "",
-            "last_name": s.last_name or "",
-            "assigned": s.instructor_id is not None,
-            "status": "online" if s.user.is_online else "offline"
-        }
-        for s in students
-    ]
+    return [{"id": s.user_id, "username": s.user.username, "first_name": s.first_name or "", "last_name": s.last_name or "", "assigned": s.instructor_id is not None, "status": "online" if s.user.is_online else "offline"} for s in students]
 
 @app.get("/api/teacher/students/")
 def get_my_students(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if current_user.status != "TEACHER": raise HTTPException(status_code=403)
     profile = current_user.teacher_profile
     if not profile: return []
-    return [
-        {
-            "id": s.user_id,
-            "username": s.user.username,
-            "first_name": s.first_name or "",
-            "last_name": s.last_name or "",
-            "status": "online" if s.user.is_online else "offline"
-        }
-        for s in profile.students
-    ]
+    return [{"id": s.user_id, "username": s.user.username, "first_name": s.first_name or "", "last_name": s.last_name or "", "status": "online" if s.user.is_online else "offline"} for s in profile.students]
+
+@app.post("/api/teacher/students/{user_id}")
+def add_student_to_class(user_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.status != "TEACHER": raise HTTPException(status_code=403)
+    student = db.query(StudentProfile).filter(StudentProfile.user_id == user_id).first()
+    if not student: raise HTTPException(status_code=404)
+    student.instructor_id = current_user.teacher_profile.id; db.commit()
+    return {"message": "Student added"}
+
+@app.delete("/api/teacher/students/{user_id}")
+def remove_student_from_class(user_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    student = db.query(StudentProfile).filter(StudentProfile.user_id == user_id).first()
+    if not student: raise HTTPException(status_code=404)
+    student.instructor_id = None; db.commit()
+    return {"message": "Student removed"}
 
 # --- MESSAGES ---
 @app.get("/api/messages/{target_id}")
 def get_chat_history(target_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    messages = db.query(ChatMessage).filter(
-        ((ChatMessage.sender_id == current_user.id) & (ChatMessage.receiver_id == target_id)) |
-        ((ChatMessage.sender_id == target_id) & (ChatMessage.receiver_id == current_user.id))
-    ).order_by(ChatMessage.sent_at.asc()).all()
+    messages = db.query(ChatMessage).filter(((ChatMessage.sender_id == current_user.id) & (ChatMessage.receiver_id == target_id)) | ((ChatMessage.sender_id == target_id) & (ChatMessage.receiver_id == current_user.id))).order_by(ChatMessage.sent_at.asc()).all()
     return messages
 
 @app.post("/api/messages/")
 async def send_chat_message(data: ChatMessageCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     new_msg = ChatMessage(sender_id=current_user.id, receiver_id=data.receiver_id, text=data.text)
-    db.add(new_msg)
-    db.commit()
-    await manager.send_personal_message({
-        "type": "NEW_MESSAGE",
-        "sender_id": current_user.id,
-        "text": data.text,
-        "time": dt.datetime.utcnow().strftime("%H:%M")
-    }, data.receiver_id)
+    db.add(new_msg); db.commit()
+    await manager.send_personal_message({"type": "NEW_MESSAGE", "sender_id": current_user.id, "text": data.text, "time": dt.datetime.utcnow().strftime("%H:%M")}, data.receiver_id)
     return {"message": "Sent"}
 
 @app.post("/api/logs/")
 async def log_and_message_aac(data: AACLogSchema, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     log = AACLog(user_id=current_user.id, icon_id=data.icon_id, icon_label=data.icon_label, message=data.message)
-    db.add(log)
-    student_profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
+    db.add(log); student_profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
     if student_profile and student_profile.instructor_id:
-        teacher_user_id = student_profile.instructor.user_id
-        text_content = data.message or f"Sent: {data.icon_label}"
-        new_msg = ChatMessage(sender_id=current_user.id, receiver_id=teacher_user_id, text=text_content, is_aac=True)
-        db.add(new_msg)
-        await manager.send_personal_message({
-            "type": "NEW_MESSAGE", "sender_id": current_user.id, "text": text_content,
-            "is_aac": True, "time": dt.datetime.utcnow().strftime("%H:%M")
-        }, teacher_user_id)
-    db.commit()
-    return {"message": "Log saved and sent to teacher"}
+        teacher_user_id = student_profile.instructor.user_id; text_content = data.message or f"Sent: {data.icon_label}"
+        new_msg = ChatMessage(sender_id=current_user.id, receiver_id=teacher_user_id, text=text_content, is_aac=True); db.add(new_msg)
+        await manager.send_personal_message({"type": "NEW_MESSAGE", "sender_id": current_user.id, "text": text_content, "is_aac": True, "time": dt.datetime.utcnow().strftime("%H:%M")}, teacher_user_id)
+    db.commit(); return {"message": "Success"}
 
-# --- PROFILE (PUT FIX) ---
+# --- TEACHER PROFILE ---
+@app.get("/api/users/me/")
+def get_me(user: User = Depends(get_current_user)):
+    p = user.teacher_profile
+    return {"username": user.username, "email": user.email, "first_name": p.first_name if p else "", "last_name": p.last_name if p else "", "display_name": p.display_name if p else "", "contact_number": p.contact_number if p else "", "room_section": p.room_section if p else "", "department": p.department if p else "", "grade_handled": p.grade_handled if p else "", "organization": p.organization if p else "", "bio": p.bio if p else ""}
+
+@app.patch("/api/users/me/")
+def update_me(data: ProfileUpdateSchema, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if data.username: user.username = data.username
+    if data.email: user.email = data.email
+    if user.teacher_profile:
+        if data.first_name is not None: user.teacher_profile.first_name = data.first_name
+        if data.last_name is not None: user.teacher_profile.last_name = data.last_name
+        if data.display_name is not None: user.teacher_profile.display_name = data.display_name
+        if data.contact_number is not None: user.teacher_profile.contact_number = data.contact_number
+        if data.room_section is not None: user.teacher_profile.room_section = data.room_section
+        if data.department is not None: user.teacher_profile.department = data.department
+        if data.grade_handled is not None: user.teacher_profile.grade_handled = data.grade_handled
+        if data.organization is not None: user.teacher_profile.organization = data.organization
+        if data.bio is not None: user.teacher_profile.bio = data.bio
+    db.commit(); return {"message": "Profile updated"}
+
+# --- STUDENT PROFILE ---
+@app.get("/api/profile/me")
+def get_profile(current_user: User = Depends(get_current_user)):
+    if current_user.status == "TEACHER":
+        p = current_user.teacher_profile
+        return {"id": current_user.id, "username": current_user.username, "email": current_user.email, "status": current_user.status, "first_name": p.first_name if p else "", "last_name": p.last_name if p else "", "display_name": p.display_name if p else "", "department": p.department if p else "", "room_section": p.room_section if p else "", "bio": p.bio if p else ""}
+    else:
+        p = current_user.student_profile; teacher_name = ""
+        if p and p.instructor:
+            t = p.instructor; teacher_name = f"{t.first_name} {t.last_name}".strip() or t.display_name or ""
+        return {"id": current_user.id, "username": current_user.username, "email": current_user.email, "status": current_user.status, "first_name": p.first_name if p else "", "last_name": p.last_name if p else "", "grade_level": p.grade_level if p else "", "disability_type": p.disability_type if p else "", "bio": p.bio if p else "", "teacher_name": teacher_name}
+
 @app.put("/api/profile/me")
 def update_profile(profile_data: ProfileUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
@@ -417,35 +420,24 @@ def update_profile(profile_data: ProfileUpdate, db: Session = Depends(get_db), c
     if profile_data.bio is not None: profile.bio = profile_data.bio
     if profile_data.grade_level is not None: profile.grade_level = profile_data.grade_level
     if profile_data.disability_type is not None: profile.disability_type = profile_data.disability_type
-    db.commit()
-    return {"message": "Profile updated successfully!"}
+    db.commit(); return {"message": "Success"}
 
 # --- BROADCAST & CC ---
 @app.post("/api/broadcast/")
 def broadcast_message(data: BroadcastSchema, db: Session = Depends(get_db)):
     now = dt.datetime.utcnow().strftime("%H:%M")
-    msg = CCMessage(text=data.text, speaker=data.speaker, sent_at=now)
-    db.add(msg)
-    db.commit()
-    return {"message": "Broadcasted successfully"}
+    msg = CCMessage(text=data.text, speaker=data.speaker, sent_at=now); db.add(msg); db.commit(); return {"message": "Broadcasted"}
 
 @app.get("/api/cc/messages/")
 def get_cc_messages(since: int = 0, db: Session = Depends(get_db)):
-    msgs = db.query(CCMessage).filter(CCMessage.id > since).order_by(CCMessage.id.asc()).limit(20).all()
-    return msgs
+    return db.query(CCMessage).filter(CCMessage.id > since).order_by(CCMessage.id.asc()).limit(20).all()
 
 # --- TTS & STT ---
 @app.post("/api/tts/")
 def text_to_speech(data: TTSSchema):
     from gtts import gTTS
-    tts = gTTS(text=data.text, lang='en')
-    buf = io.BytesIO()
-    tts.write_to_fp(buf)
-    buf.seek(0)
-    return StreamingResponse(buf, media_type="audio/mpeg")
+    tts = gTTS(text=data.text, lang='en'); buf = io.BytesIO(); tts.write_to_fp(buf); buf.seek(0); return StreamingResponse(buf, media_type="audio/mpeg")
 
 @app.post("/api/stt/")
 async def speech_to_text(audio: UploadFile = File(...)):
-    audio_bytes = await audio.read()
-    response = requests.post(HF_API_URL, headers=HF_HEADERS, data=audio_bytes)
-    return response.json()
+    audio_bytes = await audio.read(); response = requests.post(HF_API_URL, headers=HF_HEADERS, data=audio_bytes); return response.json()
