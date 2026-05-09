@@ -59,7 +59,7 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     status = Column(String, default="STUDENT")
-    is_online = Column(Boolean, default=False) # <-- Added for real-time tracking
+    is_online = Column(Boolean, default=False) # For real-time tracking
     
     teacher_profile = relationship("TeacherProfile", back_populates="user", uselist=False)
     student_profile = relationship("StudentProfile", back_populates="user", uselist=False)
@@ -123,6 +123,14 @@ for column in columns_to_add_teacher:
             conn.commit()
     except Exception:
         pass
+
+# Add the is_online column for existing databases (Fixes the undefined column error)
+try:
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE users ADD COLUMN is_online BOOLEAN DEFAULT FALSE"))
+        conn.commit()
+except Exception:
+    pass
 
 def create_user_profile_listener(mapper, connection, target):
     if target.status == "TEACHER":
@@ -456,7 +464,7 @@ def get_my_students(current_user: User = Depends(get_current_user), db: Session 
             "username": s.user.username,
             "first_name": s.first_name or "",
             "last_name": s.last_name or "",
-            "status": "online" if s.user.is_online else "offline" # <-- Dynamically fetched from DB
+            "status": "online" if s.user.is_online else "offline" # Dynamically fetched from DB
         }
         for s in profile.students
     ]
@@ -473,7 +481,7 @@ def get_all_students(current_user: User = Depends(get_current_user), db: Session
             "first_name": s.first_name or "",
             "last_name": s.last_name or "",
             "assigned": s.instructor_id is not None,
-            "status": "online" if s.user.is_online else "offline" # <-- Dynamically fetched from DB
+            "status": "online" if s.user.is_online else "offline" # Dynamically fetched from DB
         }
         for s in students
     ]
