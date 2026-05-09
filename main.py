@@ -1,6 +1,6 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, text, event
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Boolean, text, event
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from pydantic import BaseModel, EmailStr
@@ -59,6 +59,8 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     status = Column(String, default="STUDENT")
+    is_online = Column(Boolean, default=False) # <-- Added for real-time tracking
+    
     teacher_profile = relationship("TeacherProfile", back_populates="user", uselist=False)
     student_profile = relationship("StudentProfile", back_populates="user", uselist=False)
 
@@ -185,6 +187,28 @@ class ProfileUpdateSchema(BaseModel):
     organization: str | None = None
     bio: str | None = None
 
+# --- WEBSOCKET CONNECTION MANAGER ---
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: dict[int, WebSocket] = {}
+
+    async def connect(self, user_id: int, ws: WebSocket, db: Session):
+        self.active_connections[user_id] = ws
+        user = db.query(User).filter(User.id == user_id).first()
+        if user:
+            user.is_online = True
+            db.commit()
+
+    def disconnect(self, user_id: int, db: Session):
+        if user_id in self.active_connections:
+            del self.active_connections[user_id]
+        user = db.query(User).filter(User.id == user_id).first()
+        if user:
+            user.is_online = False
+            db.commit()
+
+manager = ConnectionManager()
+
 # --- 4. DEPENDENCIES & HELPERS ---
 def get_db():
     db = SessionLocal()
@@ -292,6 +316,37 @@ def reset_password(data: ResetPasswordSchema, db: Session = Depends(get_db)):
     db.commit()
     otp_store.pop(data.email, None)
     return {"message": "Password reset successfully."}
+
+# --- WEBSOCKET FOR STATUS TRACKING ---
+@app.websocket("/ws/status")
+async def websocket_status(websocket: WebSocket, db: Session = Depends(get_db)):
+    await websocket.accept()
+    user_id = None
+    try:
+        # Wait for the client to send their JWT token
+        token = await websocket.receive_text()
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("user_id")
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            await websocket.close(code=1008)
+            return
+            
+        await manager.connect(user_id, websocket, db)
+        
+        # Keep connection open
+        while True:
+            await websocket.receive_text()
+            
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        # Ensure they are marked offline when disconnected
+        if user_id:
+            manager.disconnect(user_id, db)
 
 # --- TEACHER PROFILE ---
 @app.get("/api/users/me/")
@@ -401,6 +456,7 @@ def get_my_students(current_user: User = Depends(get_current_user), db: Session 
             "username": s.user.username,
             "first_name": s.first_name or "",
             "last_name": s.last_name or "",
+            "status": "online" if s.user.is_online else "offline" # <-- Dynamically fetched from DB
         }
         for s in profile.students
     ]
@@ -417,6 +473,7 @@ def get_all_students(current_user: User = Depends(get_current_user), db: Session
             "first_name": s.first_name or "",
             "last_name": s.last_name or "",
             "assigned": s.instructor_id is not None,
+            "status": "online" if s.user.is_online else "offline" # <-- Dynamically fetched from DB
         }
         for s in students
     ]
