@@ -355,6 +355,15 @@ def remove_student_from_class(user_id: int, current_user: User = Depends(get_cur
     return {"message": "Student removed"}
 
 # --- MESSAGES ---
+@app.get("/api/messages/my-teacher")
+def get_messages_from_teacher(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Fetches the chat history between the mobile student and their instructor."""
+    if current_user.status != "STUDENT": raise HTTPException(status_code=403)
+    p = current_user.student_profile
+    if not p or not p.instructor_id: return []
+    t_id = p.instructor.user_id
+    return db.query(ChatMessage).filter(((ChatMessage.sender_id == current_user.id) & (ChatMessage.receiver_id == t_id)) | ((ChatMessage.sender_id == t_id) & (ChatMessage.receiver_id == current_user.id))).order_by(ChatMessage.sent_at.asc()).all()
+
 @app.get("/api/messages/{target_id}")
 def get_chat_history(target_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     messages = db.query(ChatMessage).filter(((ChatMessage.sender_id == current_user.id) & (ChatMessage.receiver_id == target_id)) | ((ChatMessage.sender_id == target_id) & (ChatMessage.receiver_id == current_user.id))).order_by(ChatMessage.sent_at.asc()).all()
@@ -406,10 +415,12 @@ def get_profile(current_user: User = Depends(get_current_user)):
         p = current_user.teacher_profile
         return {"id": current_user.id, "username": current_user.username, "email": current_user.email, "status": current_user.status, "first_name": p.first_name if p else "", "last_name": p.last_name if p else "", "display_name": p.display_name if p else "", "department": p.department if p else "", "room_section": p.room_section if p else "", "bio": p.bio if p else ""}
     else:
-        p = current_user.student_profile; teacher_name = ""
+        p = current_user.student_profile; teacher_name = ""; teacher_id = None
         if p and p.instructor:
-            t = p.instructor; teacher_name = f"{t.first_name} {t.last_name}".strip() or t.display_name or ""
-        return {"id": current_user.id, "username": current_user.username, "email": current_user.email, "status": current_user.status, "first_name": p.first_name if p else "", "last_name": p.last_name if p else "", "grade_level": p.grade_level if p else "", "disability_type": p.disability_type if p else "", "bio": p.bio if p else "", "teacher_name": teacher_name}
+            t = p.instructor
+            teacher_name = f"{t.first_name} {t.last_name}".strip() or t.display_name or "Unknown Teacher"
+            teacher_id = t.user_id
+        return {"id": current_user.id, "username": current_user.username, "email": current_user.email, "status": current_user.status, "first_name": p.first_name if p else "", "last_name": p.last_name if p else "", "grade_level": p.grade_level if p else "", "disability_type": p.disability_type if p else "", "bio": p.bio if p else "", "teacher_name": teacher_name, "teacher_id": teacher_id}
 
 @app.put("/api/profile/me")
 def update_profile(profile_data: ProfileUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
