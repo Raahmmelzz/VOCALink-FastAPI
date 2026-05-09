@@ -19,7 +19,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-# --- 1. SETUP & CONFIG ---
+# --- SETUP & CONFIG ---
 SECRET_KEY = "your-super-secret-jwt-key"
 ALGORITHM = "HS256"
 
@@ -50,7 +50,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 2. DATABASE MODELS ---
+# --- DATABASE MODELS ---
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
@@ -119,14 +119,6 @@ class CCMessage(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# --- AUTO-MIGRATION ---
-try:
-    with engine.connect() as conn:
-        conn.execute(text("ALTER TABLE users ADD COLUMN is_online BOOLEAN DEFAULT FALSE"))
-        conn.commit()
-except Exception:
-    pass
-
 def create_user_profile_listener(mapper, connection, target):
     if target.status == "TEACHER":
         connection.execute(TeacherProfile.__table__.insert().values(user_id=target.id))
@@ -135,7 +127,7 @@ def create_user_profile_listener(mapper, connection, target):
 
 event.listen(User, 'after_insert', create_user_profile_listener)
 
-# --- 3. SCHEMAS ---
+# --- SCHEMAS ---
 class RegisterSchema(BaseModel):
     username: str
     email: EmailStr
@@ -194,7 +186,7 @@ class ProfileUpdateSchema(BaseModel):
     organization: str | None = None
     bio: str | None = None
 
-# --- 4. WEBSOCKET CONNECTION MANAGER ---
+# --- WEBSOCKET CONNECTION MANAGER ---
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[int, WebSocket] = {}
@@ -232,7 +224,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# --- 5. DEPENDENCIES & HELPERS ---
+# --- DEPENDENCIES & HELPERS ---
 def get_db():
     db = SessionLocal()
     try: yield db
@@ -256,7 +248,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)):
     except:
         raise HTTPException(status_code=401, detail="Token expired or invalid")
 
-# --- 6. ROUTES ---
+# --- ROUTES ---
 
 @app.websocket("/ws/status")
 async def websocket_status(websocket: WebSocket, db: Session = Depends(get_db)):
@@ -292,7 +284,6 @@ def login(data: LoginSchema, db: Session = Depends(get_db)):
     access_token = create_access_token(data={"user_id": user.id})
     return {"access_token": access_token, "status": user.status}
 
-# --- FORGOT PASSWORD ---
 @app.post("/api/auth/forgot-password/")
 def forgot_password(data: ForgotPasswordSchema, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == data.email).first()
@@ -357,7 +348,6 @@ def remove_student_from_class(user_id: int, current_user: User = Depends(get_cur
 # --- MESSAGES ---
 @app.get("/api/messages/my-teacher")
 def get_messages_from_teacher(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Fetches the chat history between the mobile student and their instructor."""
     if current_user.status != "STUDENT": raise HTTPException(status_code=403)
     p = current_user.student_profile
     if not p or not p.instructor_id: return []
@@ -386,7 +376,7 @@ async def log_and_message_aac(data: AACLogSchema, db: Session = Depends(get_db),
         await manager.send_personal_message({"type": "NEW_MESSAGE", "sender_id": current_user.id, "text": text_content, "is_aac": True, "time": dt.datetime.utcnow().strftime("%H:%M")}, teacher_user_id)
     db.commit(); return {"message": "Success"}
 
-# --- TEACHER PROFILE ---
+# --- PROFILE ROUTES ---
 @app.get("/api/users/me/")
 def get_me(user: User = Depends(get_current_user)):
     p = user.teacher_profile
@@ -408,19 +398,34 @@ def update_me(data: ProfileUpdateSchema, user: User = Depends(get_current_user),
         if data.bio is not None: user.teacher_profile.bio = data.bio
     db.commit(); return {"message": "Profile updated"}
 
-# --- STUDENT PROFILE ---
 @app.get("/api/profile/me")
 def get_profile(current_user: User = Depends(get_current_user)):
+    """Dynamic profile fetch that prioritizes display_name for correct mapping."""
     if current_user.status == "TEACHER":
         p = current_user.teacher_profile
-        return {"id": current_user.id, "username": current_user.username, "email": current_user.email, "status": current_user.status, "first_name": p.first_name if p else "", "last_name": p.last_name if p else "", "display_name": p.display_name if p else "", "department": p.department if p else "", "room_section": p.room_section if p else "", "bio": p.bio if p else ""}
+        return {
+            "id": current_user.id, 
+            "username": current_user.username, 
+            "display_name": p.display_name if p else "",
+            "status": current_user.status
+        }
     else:
-        p = current_user.student_profile; teacher_name = ""; teacher_id = None
+        p = current_user.student_profile
+        teacher_name = "Teacher"
+        teacher_id = None
         if p and p.instructor:
             t = p.instructor
-            teacher_name = f"{t.first_name} {t.last_name}".strip() or t.display_name or "Unknown Teacher"
+            # Prioritize display_name (e.g. Mr. Pantilgan) over standard names
+            teacher_name = t.display_name or f"{t.first_name} {t.last_name}".strip() or "Teacher"
             teacher_id = t.user_id
-        return {"id": current_user.id, "username": current_user.username, "email": current_user.email, "status": current_user.status, "first_name": p.first_name if p else "", "last_name": p.last_name if p else "", "grade_level": p.grade_level if p else "", "disability_type": p.disability_type if p else "", "bio": p.bio if p else "", "teacher_name": teacher_name, "teacher_id": teacher_id}
+            
+        return {
+            "id": current_user.id, 
+            "username": current_user.username, 
+            "status": current_user.status, 
+            "teacher_name": teacher_name, 
+            "teacher_id": teacher_id
+        }
 
 @app.put("/api/profile/me")
 def update_profile(profile_data: ProfileUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
