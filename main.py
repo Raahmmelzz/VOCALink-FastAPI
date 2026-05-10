@@ -233,49 +233,88 @@ def get_current_user(request: Request, db: Session = Depends(get_db)):
 
 active_sessions = {}
 
+class CCRoomManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self.active_connections.append(ws)
+
+    def disconnect(self, ws: WebSocket):
+        if ws in self.active_connections:
+            self.active_connections.remove(ws)
+
+    async def broadcast(self, message: dict):
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(json.dumps(message))
+            except:
+                pass
+
+cc_manager = CCRoomManager()
+
+# The actual WebSocket endpoint the React Native app connects to
+@app.websocket("/ws/cc")
+async def websocket_cc(websocket: WebSocket):
+    await cc_manager.connect(websocket)
+    try:
+        token = await websocket.receive_text() # App sends token first
+        while True:
+            data = await websocket.receive_text() # Keep connection alive
+    except WebSocketDisconnect:
+        cc_manager.disconnect(websocket)
+    except Exception:
+        cc_manager.disconnect(websocket)
+
 @app.post("/api/sessions/toggle")
 def toggle_session(current_user: User = Depends(get_current_user)):
     if current_user.status != "TEACHER":
         raise HTTPException(status_code=403, detail="Only teachers can manage sessions.")
 
     teacher_id = current_user.id
-    
     if teacher_id in active_sessions:
-        # Turn it off
         del active_sessions[teacher_id]
         return {"active": False, "session_code": None}
     else:
-        # Turn it on with a random 6-character code
         code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
         active_sessions[teacher_id] = code
         return {"active": True, "session_code": code}
 
 @app.get("/api/sessions/student")
-def check_student_session(
-    current_user: User = Depends(get_current_user), 
-    db: Session = Depends(get_db)
-):
-    if current_user.status != "STUDENT":
-        return {"active": False}
-
-    # Find the student's profile
+def check_student_session(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.status != "STUDENT": return {"active": False}
     profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
-    if not profile or not profile.instructor_id:
-        return {"active": False, "message": "No instructor assigned."}
-
-    # The instructor_id points to TeacherProfile.id. We need the actual User.id of the teacher.
+    if not profile or not profile.instructor_id: return {"active": False}
+    
     instructor_profile = db.query(TeacherProfile).filter(TeacherProfile.id == profile.instructor_id).first()
-    if not instructor_profile:
-        return {"active": False}
-
-    teacher_user_id = instructor_profile.user_id
-
-    # Check if that teacher has an active session in our dictionary
-    if teacher_user_id in active_sessions:
-        return {"active": True, "session_code": active_sessions[teacher_user_id]}
-
+    if not instructor_profile: return {"active": False}
+    
+    if instructor_profile.user_id in active_sessions:
+        return {"active": True, "session_code": active_sessions[instructor_profile.user_id]}
     return {"active": False}
 
+@app.post("/api/broadcast/")
+async def broadcast_message(data: BroadcastSchema, db: Session = Depends(get_db)):
+    now = dt.datetime.utcnow().strftime("%H:%M")
+    
+    # 1. Save to database for history
+    msg = CCMessage(text=data.text, speaker=data.speaker, sent_at=now)
+    db.add(msg)
+    db.commit()
+    
+    # 2. INSTANTLY push to all connected students (This makes it feel like G Meet!)
+    await cc_manager.broadcast({
+        "text": data.text,
+        "speaker": data.speaker,
+        "time": now
+    })
+    
+    return {"message": "Broadcasted"}
+
+@app.get("/api/cc/messages/")
+def get_cc_messages(since: int = 0, db: Session = Depends(get_db)):
+    return db.query(CCMessage).filter(CCMessage.id > since).order_by(CCMessage.id.asc()).limit(20).all()
 
 # --- 5. ROUTES ---
 @app.post("/api/auth/register/")
