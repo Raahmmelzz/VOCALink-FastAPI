@@ -214,6 +214,40 @@ def get_db():
     db = SessionLocal()
     try: yield db
     finally: db.close()
+    
+class LiveRoomManager:
+    def __init__(self):
+        # Maps user_id -> WebSocket connection
+        self.active_connections: dict[int, WebSocket] = {}
+
+    async def connect(self, ws: WebSocket, user_id: int):
+        self.active_connections[user_id] = ws
+        await self.broadcast_presence() # Tell everyone someone joined
+
+    async def disconnect(self, user_id: int):
+        if user_id in self.active_connections:
+            del self.active_connections[user_id]
+            await self.broadcast_presence() # Tell everyone someone left
+
+    async def broadcast_presence(self):
+        # Broadcasts exactly how many people are in the room
+        online_count = len(self.active_connections)
+        await self.broadcast({"type": "presence", "count": online_count})
+
+    async def broadcast(self, message: dict):
+        dead_connections = []
+        for uid, ws in self.active_connections.items():
+            try:
+                await ws.send_text(json.dumps(message))
+            except Exception:
+                dead_connections.append(uid)
+        
+        # Clean up ghosts
+        for uid in dead_connections:
+            await self.disconnect(uid)
+
+room_manager = LiveRoomManager()
+
 
 def create_access_token(data: dict):
     to_encode = data.copy()
@@ -263,15 +297,49 @@ cc_manager = CCRoomManager()
 # The actual WebSocket endpoint the React Native app connects to
 @app.websocket("/ws/cc")
 async def websocket_cc(websocket: WebSocket):
-    await cc_manager.connect(websocket)
+    await websocket.accept()
+    user_id = None
     try:
-        token = await websocket.receive_text() # App sends token first
+        # The very first message MUST be the authentication token
+        token = await websocket.receive_text()
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("user_id")
+        
+        if not user_id:
+            await websocket.close(code=1008)
+            return
+
+        # Securely add them to the room
+        await room_manager.connect(websocket, user_id)
+
+        # Keep the connection alive
         while True:
-            data = await websocket.receive_text() # Keep connection alive
+            await websocket.receive_text()
+            
     except WebSocketDisconnect:
-        cc_manager.disconnect(websocket)
+        if user_id: await room_manager.disconnect(user_id)
     except Exception:
-        cc_manager.disconnect(websocket)
+        if user_id: await room_manager.disconnect(user_id)
+        try: await websocket.close()
+        except: pass
+
+@app.post("/api/broadcast/")
+async def broadcast_to_students(data: BroadcastSchema, db: Session = Depends(get_db)):
+    now = datetime.datetime.utcnow().strftime("%H:%M")
+    
+    # Save to database
+    msg = CCMessage(text=data.text, speaker=data.speaker, sent_at=now)
+    db.add(msg)
+    db.commit()
+    
+    # Push to all connected devices instantly
+    await room_manager.broadcast({
+        "type": "message",
+        "text": data.text,
+        "speaker": data.speaker,
+        "time": now
+    })
+    return {"message": "Broadcasted"}
 
 @app.post("/api/sessions/toggle")
 def toggle_session(current_user: User = Depends(get_current_user)):
@@ -300,23 +368,6 @@ def check_student_session(current_user: User = Depends(get_current_user), db: Se
         return {"active": True, "session_code": active_sessions[instructor_profile.user_id]}
     return {"active": False}
 
-@app.post("/api/broadcast/")
-async def broadcast_message(data: BroadcastSchema, db: Session = Depends(get_db)):
-    now = dt.datetime.utcnow().strftime("%H:%M")
-    
-    # 1. Save to database for history
-    msg = CCMessage(text=data.text, speaker=data.speaker, sent_at=now)
-    db.add(msg)
-    db.commit()
-    
-    # 2. INSTANTLY push to all connected students (This makes it feel like G Meet!)
-    await cc_manager.broadcast({
-        "text": data.text,
-        "speaker": data.speaker,
-        "time": now
-    })
-    
-    return {"message": "Broadcasted"}
 
 @app.get("/api/cc/messages/")
 def get_cc_messages(since: int = 0, db: Session = Depends(get_db)):
@@ -565,19 +616,6 @@ async def websocket_cc(websocket: WebSocket):
             await websocket.receive_text()  # keep connection alive
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-
-@app.post("/api/broadcast/")
-async def broadcast_to_students(
-    data: BroadcastSchema,
-    current_user: User = Depends(get_current_user)
-):
-    now = datetime.datetime.now().strftime("%H:%M")
-    await manager.broadcast({
-        "text": data.text,
-        "speaker": data.speaker,
-        "time": now,
-    })
-    return {"message": f"Broadcasted to {len(manager.active)} student(s)"}
 
 @app.get("/api/teacher/students/")
 def get_my_students(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
