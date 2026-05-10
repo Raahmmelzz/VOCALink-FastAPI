@@ -141,6 +141,13 @@ class RegisterSchema(BaseModel):
     password: str
     status: str = "TEACHER" # Note: Mobile app currently overrides this to "STUDENT"
     
+class CCMessage(Base):
+    __tablename__ = "cc_messages"
+    id = Column(Integer, primary_key=True, index=True)
+    text = Column(String)
+    speaker = Column(String, default="teacher")
+    sent_at = Column(String, default=lambda: dt.datetime.utcnow().isoformat())
+    
 class ProfileUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
@@ -231,7 +238,6 @@ def get_current_user(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
-active_sessions = {}
 
 class CCRoomManager:
     def __init__(self):
@@ -572,6 +578,61 @@ async def broadcast_to_students(
         "time": now,
     })
     return {"message": f"Broadcasted to {len(manager.active)} student(s)"}
+
+@app.get("/api/teacher/students/")
+def get_my_students(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Teachers only")
+    profile = current_user.teacher_profile
+    if not profile:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+    return [
+        {
+            "id": s.user_id,
+            "username": s.user.username,
+            "first_name": s.first_name or "",
+            "last_name": s.last_name or "",
+            "status": "offline" # Fixed syntax and removed broken is_online reference
+        }
+        for s in profile.students
+    ]
+
+@app.get("/api/users/all-students/")
+def get_all_students(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Teachers only")
+    students = db.query(StudentProfile).join(User).all()
+    return [
+        {
+            "id": s.user_id,
+            "username": s.user.username,
+            "first_name": s.first_name or "",
+            "last_name": s.last_name or "",
+            "assigned": s.instructor_id is not None,
+            "status": "offline" # Fixed syntax and removed broken is_online reference
+        }
+        for s in students
+    ]
+
+@app.post("/api/teacher/students/{user_id}")
+def add_student_to_class(user_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Teachers only")
+    student = db.query(StudentProfile).filter(StudentProfile.user_id == user_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    student.instructor_id = current_user.teacher_profile.id
+    db.commit()
+    return {"message": "Student added to class"}
+
+@app.delete("/api/teacher/students/{user_id}")
+def remove_student_from_class(user_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    student = db.query(StudentProfile).filter(StudentProfile.user_id == user_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    student.instructor_id = None
+    db.commit()
+    return {"message": "Student removed"}
 
 # --- PHASE 3: TTS (gTTS) ---
 @app.post("/api/tts/")
