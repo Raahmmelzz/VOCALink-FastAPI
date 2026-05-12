@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.responses import StreamingResponse
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, text, event
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, text
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from pydantic import BaseModel, EmailStr
@@ -15,6 +15,10 @@ import os
 import io
 import tempfile
 import json
+import random
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # --- 1. SETUP & CONFIG ---
 SECRET_KEY = "your-super-secret-jwt-key"
@@ -23,6 +27,10 @@ ALGORITHM = "HS256"
 HF_API_URL = "https://api-inference.huggingface.co/models/rammealz123/VOCALink-Mobile-STT"
 HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
 HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
+
+SMTP_EMAIL    = os.getenv("SMTP_EMAIL", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+otp_store: dict = {}
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./vocalink.db")
 if DATABASE_URL.startswith("postgres://"):
@@ -111,13 +119,7 @@ for column in columns_to_add_teacher:
     except Exception:
         pass
 
-def create_user_profile_listener(mapper, connection, target):
-    if target.status == "TEACHER":
-        connection.execute(TeacherProfile.__table__.insert().values(user_id=target.id))
-    elif target.status == "STUDENT":
-        connection.execute(StudentProfile.__table__.insert().values(user_id=target.id))
-
-event.listen(User, 'after_insert', create_user_profile_listener)
+# Profile creation is handled explicitly in the register endpoint
 
 # --- 3. SCHEMAS ---
 class RegisterSchema(BaseModel):
@@ -144,6 +146,18 @@ class AACLogSchema(BaseModel):
 
 class TTSSchema(BaseModel):
     text: str
+
+class ForgotPasswordSchema(BaseModel):
+    email: str
+
+class VerifyOTPSchema(BaseModel):
+    email: str
+    otp: str
+
+class ResetPasswordSchema(BaseModel):
+    email: str
+    otp: str
+    new_password: str
 
 class ProfileUpdateSchema(BaseModel):
     username: str | None = None
@@ -213,6 +227,70 @@ def login(data: LoginSchema, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     access_token = create_access_token(data={"user_id": user.id})
     return {"access_token": access_token, "status": user.status}
+
+# --- FORGOT PASSWORD ---
+@app.post("/api/auth/forgot-password/")
+def forgot_password(data: ForgotPasswordSchema, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == data.email).first()
+    if not user:
+        # Don't reveal if email exists — always return success
+        return {"message": "If that email exists, an OTP has been sent."}
+
+    otp = str(random.randint(100000, 999999))
+    expires = dt.datetime.utcnow() + dt.timedelta(minutes=10)
+    otp_store[data.email] = {"otp": otp, "expires_at": expires}
+
+    # Try to send email — if SMTP not configured, log OTP instead
+    if SMTP_EMAIL and SMTP_PASSWORD:
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = "VocaLink Password Reset OTP"
+            msg["From"]    = SMTP_EMAIL
+            msg["To"]      = data.email
+            html = f"""
+            <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f9f9f9;border-radius:12px">
+              <h2 style="color:#1AADDC">VocaLink — Password Reset</h2>
+              <p>Your one-time password (OTP) is:</p>
+              <div style="font-size:36px;font-weight:800;letter-spacing:8px;color:#1A1A2E;padding:16px 0">{otp}</div>
+              <p style="color:#6B7280;font-size:13px">This OTP expires in <strong>10 minutes</strong>.</p>
+            </div>
+            """
+            msg.attach(MIMEText(html, "html"))
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(SMTP_EMAIL, SMTP_PASSWORD)
+                server.sendmail(SMTP_EMAIL, data.email, msg.as_string())
+        except Exception as e:
+            print(f"Email failed: {e} — OTP for {data.email}: {otp}")
+    else:
+        # No SMTP configured — print OTP to Render logs for testing
+        print(f"[OTP] {data.email} → {otp}")
+
+    return {"message": "OTP sent to your email."}
+
+@app.post("/api/auth/verify-otp/")
+def verify_otp(data: VerifyOTPSchema):
+    record = otp_store.get(data.email)
+    if not record:
+        raise HTTPException(status_code=400, detail="No OTP found. Please request a new one.")
+    if dt.datetime.utcnow() > record["expires_at"]:
+        otp_store.pop(data.email, None)
+        raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
+    if record["otp"] != data.otp:
+        raise HTTPException(status_code=400, detail="Invalid OTP.")
+    return {"message": "OTP verified."}
+
+@app.post("/api/auth/reset-password/")
+def reset_password(data: ResetPasswordSchema, db: Session = Depends(get_db)):
+    record = otp_store.get(data.email)
+    if not record or record["otp"] != data.otp or dt.datetime.utcnow() > record["expires_at"]:
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
+    user = db.query(User).filter(User.email == data.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    user.hashed_password = pwd_context.hash(data.new_password)
+    db.commit()
+    otp_store.pop(data.email, None)
+    return {"message": "Password reset successfully."}
 
 # --- TEACHER ROUTES ---
 @app.get("/api/users/me/")
