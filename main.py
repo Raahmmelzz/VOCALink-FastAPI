@@ -151,13 +151,7 @@ for column in messages_columns:
     except Exception:
         pass
 
-def create_user_profile_listener(mapper, connection, target):
-    if target.status == "TEACHER":
-        connection.execute(TeacherProfile.__table__.insert().values(user_id=target.id))
-    elif target.status == "STUDENT":
-        connection.execute(StudentProfile.__table__.insert().values(user_id=target.id))
-
-event.listen(User, 'after_insert', create_user_profile_listener)
+# Profile creation handled in register endpoint — no event listener needed
 
 # --- 3. SCHEMAS (Pydantic) ---
 class RegisterSchema(BaseModel):
