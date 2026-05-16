@@ -110,6 +110,15 @@ class CCMessage(Base):
     speaker = Column(String, default="teacher")
     sent_at = Column(String, default=lambda: dt.datetime.utcnow().isoformat())
 
+class SessionLog(Base):
+    __tablename__ = "session_logs"
+    id           = Column(Integer, primary_key=True, index=True)
+    session_code = Column(String, index=True)
+    student_id   = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
+    icon_id      = Column(String)
+    icon_label   = Column(String)
+    tapped_at    = Column(String, default=lambda: dt.datetime.utcnow().isoformat())
+
 # ✅ NEW: Direct message model for the Messages screen
 class Message(Base):
     __tablename__ = "messages"
@@ -182,6 +191,11 @@ class TTSSchema(BaseModel):
 class BroadcastSchema(BaseModel):
     text: str
     speaker: str = "teacher"
+
+class SessionLogSchema(BaseModel):
+    session_code: str
+    icon_id: str
+    icon_label: str
 
 # ✅ NEW: Schema for sending a direct message
 class MessageSchema(BaseModel):
@@ -359,6 +373,49 @@ def check_student_session(current_user: User = Depends(get_current_user), db: Se
     if instructor_profile.user_id in active_sessions:
         return {"active": True, "session_code": active_sessions[instructor_profile.user_id]}
     return {"active": False}
+
+# --- SESSION LOGS ---
+@app.post("/api/sessions/log/")
+def log_session_tap(
+    data: SessionLogSchema,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    log = SessionLog(
+        session_code=data.session_code,
+        student_id=current_user.id,
+        icon_id=data.icon_id,
+        icon_label=data.icon_label,
+        tapped_at=dt.datetime.utcnow().isoformat(),
+    )
+    db.add(log)
+    db.commit()
+    return {"message": "Session tap logged."}
+
+@app.get("/api/sessions/logs/")
+def get_session_logs(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Teachers only.")
+    session_code = active_sessions.get(current_user.id)
+    if not session_code:
+        return []
+    logs = db.query(SessionLog).filter(SessionLog.session_code == session_code)\
+              .order_by(SessionLog.id.desc()).limit(100).all()
+    # Get student usernames
+    result = []
+    for l in logs:
+        student = db.query(User).filter(User.id == l.student_id).first()
+        result.append({
+            "id": l.id,
+            "student_name": student.username if student else "Unknown",
+            "icon_id": l.icon_id,
+            "icon_label": l.icon_label,
+            "tapped_at": l.tapped_at,
+        })
+    return result
 
 @app.get("/api/cc/messages/")
 def get_cc_messages(since: int = 0, db: Session = Depends(get_db)):
