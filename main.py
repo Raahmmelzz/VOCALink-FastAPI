@@ -515,7 +515,7 @@ def get_session_log(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Full chronological log for a session: teacher CC + student AAC taps."""
+    """Full chronological log for a session: teacher CC + student AAC taps + student typed replies."""
     if current_user.status != "TEACHER":
         raise HTTPException(status_code=403, detail="Teachers only")
     tp = current_user.teacher_profile
@@ -534,11 +534,23 @@ def get_session_log(
 
     student_ids = [s.user_id for s in tp.students]
     aac_logs = []
+    text_replies = []
     if student_ids:
         aac_logs = (
             db.query(AACLog)
             .filter(AACLog.session_id == session_id, AACLog.user_id.in_(student_ids))
             .order_by(AACLog.tapped_at.asc())
+            .all()
+        )
+        # Typed replies sent during this session period
+        text_replies = (
+            db.query(Message)
+            .filter(
+                Message.sender_id.in_(student_ids),
+                Message.receiver_id == current_user.id,
+                Message.sent_at >= sess.started_at,
+            )
+            .order_by(Message.sent_at.asc())
             .all()
         )
 
@@ -565,6 +577,16 @@ def get_session_log(
             "speaker":  name_map.get(l.user_id, f"Student #{l.user_id}"),
             "text":     l.message or l.icon_label,
             "icon_id":  l.icon_id,
+        })
+    for r in text_replies:
+        ts = r.sent_at or ""
+        entries.append({
+            "type":     "reply",
+            "id":       f"reply-{r.id}",
+            "sort_key": ts,
+            "time":     ts[11:16] if len(ts) > 15 else ts,
+            "speaker":  name_map.get(r.sender_id, f"Student #{r.sender_id}"),
+            "text":     r.text,
         })
 
     entries.sort(key=lambda e: e["sort_key"])
