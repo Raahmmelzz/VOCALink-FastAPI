@@ -724,9 +724,11 @@ def get_messages_with_teacher(
 
 @app.get("/api/messages/my-students")
 def get_messages_from_students(
+    since: int = 0,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Poll for student→teacher messages only; supports ?since=<last_id> for live polling."""
     if current_user.status != "TEACHER":
         raise HTTPException(status_code=403, detail="Teachers only")
     tp = current_user.teacher_profile
@@ -738,15 +740,24 @@ def get_messages_from_students(
     msgs = (
         db.query(Message)
         .filter(
-            ((Message.sender_id.in_(ids)) & (Message.receiver_id == current_user.id)) |
-            ((Message.sender_id == current_user.id) & (Message.receiver_id.in_(ids)))
+            Message.sender_id.in_(ids),
+            Message.receiver_id == current_user.id,
+            Message.id > since,
         )
         .order_by(Message.sent_at.asc())
+        .limit(50)
         .all()
     )
+    name_map = _build_student_name_map(db, ids)
     return [
-        {"id": m.id, "sender_id": m.sender_id, "receiver_id": m.receiver_id,
-         "text": m.text, "is_aac": m.is_aac, "sent_at": m.sent_at}
+        {
+            "id": m.id,
+            "sender_id": m.sender_id,
+            "text": m.text,
+            "is_aac": m.is_aac,
+            "sent_at": m.sent_at,
+            "student_name": name_map.get(m.sender_id, f"Student #{m.sender_id}"),
+        }
         for m in msgs
     ]
 
