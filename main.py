@@ -484,6 +484,100 @@ def check_teacher_session(
     return {"active": False, "session_code": None}
 
 
+@app.get("/api/sessions/all/")
+def list_sessions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Web LiveCC page: list all teacher sessions for the session selector."""
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Teachers only")
+    tp = current_user.teacher_profile
+    if not tp:
+        return []
+    sessions = (
+        db.query(ClassSession)
+        .filter_by(teacher_id=tp.id)
+        .order_by(ClassSession.started_at.desc())
+        .limit(50)
+        .all()
+    )
+    return [
+        {"id": s.id, "session_code": s.session_code,
+         "started_at": s.started_at, "is_active": s.is_active}
+        for s in sessions
+    ]
+
+
+@app.get("/api/sessions/{session_id}/log/")
+def get_session_log(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Full chronological log for a session: teacher CC + student AAC taps."""
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Teachers only")
+    tp = current_user.teacher_profile
+    if not tp:
+        raise HTTPException(status_code=404, detail="No teacher profile")
+    sess = db.query(ClassSession).filter_by(id=session_id, teacher_id=tp.id).first()
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    cc_msgs = (
+        db.query(CCMessage)
+        .filter_by(session_id=session_id)
+        .order_by(CCMessage.sent_at.asc())
+        .all()
+    )
+
+    student_ids = [s.user_id for s in tp.students]
+    aac_logs = []
+    if student_ids:
+        aac_logs = (
+            db.query(AACLog)
+            .filter(AACLog.session_id == session_id, AACLog.user_id.in_(student_ids))
+            .order_by(AACLog.tapped_at.asc())
+            .all()
+        )
+
+    name_map = _build_student_name_map(db, student_ids) if student_ids else {}
+
+    entries = []
+    for m in cc_msgs:
+        ts = m.sent_at or ""
+        entries.append({
+            "type":     "cc",
+            "id":       f"cc-{m.id}",
+            "sort_key": ts,
+            "time":     ts[11:16] if len(ts) > 15 else ts,
+            "speaker":  "Teacher",
+            "text":     m.text,
+        })
+    for l in aac_logs:
+        ts = l.tapped_at or ""
+        entries.append({
+            "type":     "aac",
+            "id":       f"aac-{l.id}",
+            "sort_key": ts,
+            "time":     ts[11:16] if len(ts) > 15 else ts,
+            "speaker":  name_map.get(l.user_id, f"Student #{l.user_id}"),
+            "text":     l.message or l.icon_label,
+            "icon_id":  l.icon_id,
+        })
+
+    entries.sort(key=lambda e: e["sort_key"])
+
+    return {
+        "session_id":   sess.id,
+        "session_code": sess.session_code,
+        "started_at":   sess.started_at,
+        "is_active":    sess.is_active,
+        "entries":      entries,
+    }
+
+
 @app.get("/api/sessions/student")
 def check_student_session(
     db: Session = Depends(get_db),
@@ -715,8 +809,21 @@ def remove_student(user_id: int, db: Session = Depends(get_db), current_user: Us
 
 @app.post("/api/logs/")
 def log_icon_tap(data: AACLogSchema, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    db.add(AACLog(user_id=current_user.id, icon_id=data.icon_id, icon_label=data.icon_label,
-                  message=data.message, tapped_at=dt.datetime.utcnow().isoformat()))
+    session_id = None
+    if current_user.status == "STUDENT":
+        sp = db.query(StudentProfile).filter_by(user_id=current_user.id).first()
+        if sp and sp.instructor_id:
+            sess = db.query(ClassSession).filter_by(teacher_id=sp.instructor_id, is_active=True).first()
+            if sess:
+                session_id = sess.id
+    db.add(AACLog(
+        user_id    = current_user.id,
+        session_id = session_id,
+        icon_id    = data.icon_id,
+        icon_label = data.icon_label,
+        message    = data.message,
+        tapped_at  = dt.datetime.utcnow().isoformat(),
+    ))
     db.commit()
     return {"message": "Log saved"}
 
@@ -828,8 +935,6 @@ def text_to_speech(data: TTSSchema, current_user: User = Depends(get_current_use
 
 @app.post("/api/stt/")
 async def speech_to_text(audio: UploadFile = File(...), current_user: User = Depends(get_current_user)):
-    if not audio.filename.lower().endswith(".wav"):
-        raise HTTPException(status_code=400, detail="Only .wav files accepted")
     try:
         audio_bytes = await audio.read()
         resp = requests.post(HF_API_URL, headers=HF_HEADERS, data=audio_bytes, timeout=30)
