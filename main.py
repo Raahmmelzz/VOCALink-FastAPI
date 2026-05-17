@@ -644,23 +644,34 @@ def get_cc_messages(
         tid = sp.instructor_id if sp else None
         if not tid:
             return []
-        # Only return messages when the session is actually active
         sess = db.query(ClassSession).filter_by(teacher_id=tid, is_active=True).first()
         if not sess:
             return []
+        # Scope to current session only so old sessions don't bleed in
         msgs = (
             db.query(CCMessage)
-            .filter(CCMessage.teacher_id == tid, CCMessage.id > since)
+            .filter(
+                CCMessage.teacher_id == tid,
+                CCMessage.id > since,
+                CCMessage.sent_at >= sess.started_at,
+            )
             .order_by(CCMessage.id.asc())
             .limit(30)
             .all()
         )
     else:
-        # Teacher fetches their own sent captions for the live-room feed
+        # Teacher live-room: scope to current active session only
         tp = current_user.teacher_profile
+        sess = db.query(ClassSession).filter_by(teacher_id=tp.id, is_active=True).first()
+        if not sess:
+            return []
         msgs = (
             db.query(CCMessage)
-            .filter(CCMessage.teacher_id == tp.id, CCMessage.id > since)
+            .filter(
+                CCMessage.teacher_id == tp.id,
+                CCMessage.id > since,
+                CCMessage.sent_at >= sess.started_at,
+            )
             .order_by(CCMessage.id.asc())
             .limit(30)
             .all()
@@ -728,7 +739,7 @@ def get_messages_from_students(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Poll for student→teacher messages only; supports ?since=<last_id> for live polling."""
+    """Poll for student→teacher messages only; scoped to the current active session."""
     if current_user.status != "TEACHER":
         raise HTTPException(status_code=403, detail="Teachers only")
     tp = current_user.teacher_profile
@@ -737,17 +748,19 @@ def get_messages_from_students(
     ids = [s.user_id for s in tp.students]
     if not ids:
         return []
-    msgs = (
+    sess = db.query(ClassSession).filter_by(teacher_id=tp.id, is_active=True).first()
+    query = (
         db.query(Message)
         .filter(
             Message.sender_id.in_(ids),
             Message.receiver_id == current_user.id,
             Message.id > since,
         )
-        .order_by(Message.sent_at.asc())
-        .limit(50)
-        .all()
     )
+    # Scope to current session so old replies don't bleed into a new session
+    if sess:
+        query = query.filter(Message.sent_at >= sess.started_at)
+    msgs = query.order_by(Message.sent_at.asc()).limit(50).all()
     name_map = _build_student_name_map(db, ids)
     return [
         {
