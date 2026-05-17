@@ -141,7 +141,7 @@ class CCMessage(Base):
     sent_at    = Column(String, default=lambda: dt.datetime.utcnow().isoformat())
 
 
-# ── Direct messages (Messages screen) ───────────────────────────────────────
+# ✅ NEW: Direct message model for the Messages screen
 class Message(Base):
     __tablename__ = "messages"
     id          = Column(Integer, primary_key=True, index=True)
@@ -188,11 +188,28 @@ for _table, _col in _migrations:
     except Exception:
         pass
 
+# Auto-migrate messages table columns if they don't exist
+messages_columns = [
+    "sender_id INTEGER", "receiver_id INTEGER", "text VARCHAR",
+    "is_aac BOOLEAN DEFAULT 0", "sent_at VARCHAR"
+]
+for column in messages_columns:
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(f"ALTER TABLE messages ADD COLUMN {column}"))
+            conn.commit()
+    except Exception:
+        pass
 
-# ─────────────────────────────────────────────
-# 3. SCHEMAS
-# ─────────────────────────────────────────────
+def create_user_profile_listener(mapper, connection, target):
+    if target.status == "TEACHER":
+        connection.execute(TeacherProfile.__table__.insert().values(user_id=target.id))
+    elif target.status == "STUDENT":
+        connection.execute(StudentProfile.__table__.insert().values(user_id=target.id))
 
+event.listen(User, 'after_insert', create_user_profile_listener)
+
+# --- 3. SCHEMAS (Pydantic) ---
 class RegisterSchema(BaseModel):
     username: str
     email:    EmailStr
@@ -227,6 +244,7 @@ class BroadcastSchema(BaseModel):
     text:    str
     speaker: str = "teacher"
 
+# ✅ NEW: Schema for sending a direct message
 class MessageSchema(BaseModel):
     receiver_id: int
     text:        str
@@ -273,15 +291,107 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+# --- 5. WEBSOCKET ENDPOINT ---
+# ✅ FIX: Only ONE /ws/cc route. Both teacher and students land in the same room_manager.
+@app.websocket("/ws/cc")
+async def websocket_cc(websocket: WebSocket):
+    await websocket.accept()
+    user_id = None
+    try:
+        token = await websocket.receive_text()
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("user_id")
 
-def _make_code(n: int = 6) -> str:
-    return "".join(random.choices(string.ascii_uppercase + string.digits, k=n))
+        if not user_id:
+            await websocket.close(code=1008)
+            return
 
+        await room_manager.connect(websocket, user_id)
 
-# ─────────────────────────────────────────────
-# 5. AUTH
-# ─────────────────────────────────────────────
+        while True:
+            await websocket.receive_text()  # keep connection alive
 
+    except WebSocketDisconnect:
+        if user_id:
+            await room_manager.disconnect(user_id)
+    except Exception:
+        if user_id:
+            await room_manager.disconnect(user_id)
+        try:
+            await websocket.close()
+        except:
+            pass
+
+# --- 6. BROADCAST ---
+# ✅ FIX: Now requires auth and only teachers can broadcast.
+@app.post("/api/broadcast/")
+async def broadcast_to_students(
+    data: BroadcastSchema,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Only teachers can broadcast.")
+
+    now = datetime.datetime.utcnow().strftime("%H:%M")
+
+    msg = CCMessage(text=data.text, speaker=data.speaker, sent_at=now)
+    db.add(msg)
+    db.commit()
+
+    await room_manager.broadcast({
+        "type": "message",
+        "text": data.text,
+        "speaker": data.speaker,
+        "time": now
+    })
+    return {"message": "Broadcasted"}
+
+# --- 7. SESSION ROUTES ---
+@app.post("/api/sessions/toggle")
+def toggle_session(current_user: User = Depends(get_current_user)):
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Only teachers can manage sessions.")
+
+    teacher_id = current_user.id
+    if teacher_id in active_sessions:
+        del active_sessions[teacher_id]
+        return {"active": False, "session_code": None}
+    else:
+        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+        active_sessions[teacher_id] = code
+        return {"active": True, "session_code": code}
+
+# ✅ NEW: Teachers can check if their own session is still running after navigating away
+@app.get("/api/sessions/teacher")
+def check_teacher_session(current_user: User = Depends(get_current_user)):
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Teachers only.")
+    if current_user.id in active_sessions:
+        return {"active": True, "session_code": active_sessions[current_user.id]}
+    return {"active": False, "session_code": None}
+
+@app.get("/api/sessions/student")
+def check_student_session(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.status != "STUDENT":
+        return {"active": False}
+    profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
+    if not profile or not profile.instructor_id:
+        return {"active": False}
+
+    instructor_profile = db.query(TeacherProfile).filter(TeacherProfile.id == profile.instructor_id).first()
+    if not instructor_profile:
+        return {"active": False}
+
+    if instructor_profile.user_id in active_sessions:
+        return {"active": True, "session_code": active_sessions[instructor_profile.user_id]}
+    return {"active": False}
+
+@app.get("/api/cc/messages/")
+def get_cc_messages(since: int = 0, db: Session = Depends(get_db)):
+    return db.query(CCMessage).filter(CCMessage.id > since).order_by(CCMessage.id.asc()).limit(20).all()
+
+# --- 8. AUTH ROUTES ---
 @app.post("/api/auth/register/")
 def register(data: RegisterSchema, db: Session = Depends(get_db)):
     if db.query(User).filter(
