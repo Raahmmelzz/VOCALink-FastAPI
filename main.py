@@ -50,6 +50,10 @@ ALLOWED_ORIGINS = [
     "http://localhost:19006",
     "http://127.0.0.1:8081",
     "http://127.0.0.1:19006",
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
     "https://vocalink-fastapi.onrender.com",
     # Add your Expo tunnel / ngrok URL here while testing on device
 ]
@@ -131,6 +135,7 @@ class CCMessage(Base):
     __tablename__ = "cc_messages"
     id         = Column(Integer, primary_key=True, index=True)
     teacher_id = Column(Integer, ForeignKey("teacher_profiles.id", ondelete="CASCADE"), nullable=True)
+    session_id = Column(Integer, ForeignKey("class_sessions.id", ondelete="SET NULL"), nullable=True)
     text       = Column(String)
     speaker    = Column(String, default="teacher")
     sent_at    = Column(String, default=lambda: dt.datetime.utcnow().isoformat())
@@ -154,6 +159,7 @@ class AACLog(Base):
     __tablename__ = "aac_logs"
     id         = Column(Integer, primary_key=True, index=True)
     user_id    = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
+    session_id = Column(Integer, ForeignKey("class_sessions.id", ondelete="SET NULL"), nullable=True)
     icon_id    = Column(String)
     icon_label = Column(String)
     message    = Column(String, nullable=True)
@@ -171,6 +177,8 @@ _migrations = [
     ("teacher_profiles", "bio VARCHAR DEFAULT ''"),
     ("cc_messages",      "teacher_id INTEGER"),
     ("class_sessions",   "is_active BOOLEAN DEFAULT 1"),
+    ("cc_messages",      "session_id INTEGER"),
+    ("aac_logs",         "session_id INTEGER"),
 ]
 for _table, _col in _migrations:
     try:
@@ -391,6 +399,31 @@ def update_me(
     return {"message": "Profile updated"}
 
 
+@app.get("/api/users/me/")
+def get_me(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Web App.tsx fetches this to populate the sidebar teacher name."""
+    if current_user.status == "TEACHER":
+        p = current_user.teacher_profile
+        return {
+            "id":           current_user.id,
+            "username":     current_user.username,
+            "email":        current_user.email,
+            "status":       current_user.status,
+            "display_name": p.display_name if p else "",
+            "first_name":   p.first_name   if p else "",
+            "last_name":    p.last_name    if p else "",
+        }
+    p = current_user.student_profile
+    return {
+        "id":         current_user.id,
+        "username":   current_user.username,
+        "email":      current_user.email,
+        "status":     current_user.status,
+        "first_name": p.first_name if p else "",
+        "last_name":  p.last_name  if p else "",
+    }
+
+
 @app.delete("/api/profile/me")
 def delete_account(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     db.delete(current_user)
@@ -490,6 +523,7 @@ def broadcast_to_students(
 
     msg = CCMessage(
         teacher_id = tp.id,
+        session_id = sess.id,
         text       = data.text,
         speaker    = data.speaker,
         sent_at    = dt.datetime.utcnow().isoformat(),
@@ -692,6 +726,82 @@ def get_logs(db: Session = Depends(get_db), current_user: User = Depends(get_cur
     logs = db.query(AACLog).filter_by(user_id=current_user.id).order_by(AACLog.id.desc()).limit(50).all()
     return [{"id": l.id, "icon_id": l.icon_id, "icon_label": l.icon_label,
              "message": l.message, "tapped_at": l.tapped_at} for l in logs]
+
+
+def _build_student_name_map(db: Session, student_user_ids: list) -> dict:
+    """Return {user_id: display_name} for a list of student user IDs."""
+    users    = {u.id: u for u in db.query(User).filter(User.id.in_(student_user_ids)).all()}
+    profiles = {sp.user_id: sp for sp in
+                db.query(StudentProfile).filter(StudentProfile.user_id.in_(student_user_ids)).all()}
+    result = {}
+    for uid in student_user_ids:
+        sp   = profiles.get(uid)
+        u    = users.get(uid)
+        name = ((sp.first_name or "") + " " + (sp.last_name or "")).strip() if sp else ""
+        result[uid] = name or (u.username if u else f"Student #{uid}")
+    return result
+
+
+def _format_log(l: AACLog, name_map: dict) -> dict:
+    return {
+        "id":           l.id,
+        "user_id":      l.user_id,
+        "student_name": name_map.get(l.user_id, f"Student #{l.user_id}"),
+        "icon_id":      l.icon_id,
+        "icon_label":   l.icon_label,
+        "message":      l.message,
+        "tapped_at":    l.tapped_at,
+    }
+
+
+@app.get("/api/teacher/logs/")
+def get_teacher_logs(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Web LiveCC page: full history of every student's AAC taps for this teacher."""
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Teachers only")
+    tp = current_user.teacher_profile
+    if not tp:
+        return []
+    ids = [s.user_id for s in tp.students]
+    if not ids:
+        return []
+    logs = (
+        db.query(AACLog)
+        .filter(AACLog.user_id.in_(ids))
+        .order_by(AACLog.tapped_at.asc())
+        .limit(500)
+        .all()
+    )
+    name_map = _build_student_name_map(db, ids)
+    return [_format_log(l, name_map) for l in logs]
+
+
+@app.get("/api/sessions/logs/")
+def get_session_logs(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Broadcast page sidebar: AAC taps from the current active session only."""
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Teachers only")
+    tp = current_user.teacher_profile
+    if not tp:
+        return []
+    sess = db.query(ClassSession).filter_by(teacher_id=tp.id, is_active=True).first()
+    if not sess:
+        return []
+    ids = [s.user_id for s in tp.students]
+    if not ids:
+        return []
+    logs = (
+        db.query(AACLog)
+        .filter(
+            AACLog.user_id.in_(ids),
+            AACLog.tapped_at >= sess.started_at,
+        )
+        .order_by(AACLog.tapped_at.asc())
+        .limit(200)
+        .all()
+    )
+    name_map = _build_student_name_map(db, ids)
+    return [_format_log(l, name_map) for l in logs]
 
 
 # ─────────────────────────────────────────────
