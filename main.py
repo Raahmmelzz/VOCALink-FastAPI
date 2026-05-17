@@ -100,7 +100,7 @@ class TeacherProfile(Base):
 
     user     = relationship("User",           back_populates="teacher_profile")
     students = relationship("StudentProfile", back_populates="instructor")
-    session  = relationship("ClassSession",   back_populates="teacher", uselist=False)
+    sessions = relationship("ClassSession",   back_populates="teacher")
 
 
 class StudentProfile(Base):
@@ -118,16 +118,16 @@ class StudentProfile(Base):
     user       = relationship("User",           back_populates="student_profile")
 
 
-# ── DB-backed session — survives Render restarts / spin-downs ───────────────
+# ── DB-backed session — one row per session, multiple per teacher ────────────
 class ClassSession(Base):
     __tablename__ = "class_sessions"
     id           = Column(Integer, primary_key=True, index=True)
-    teacher_id   = Column(Integer, ForeignKey("teacher_profiles.id", ondelete="CASCADE"), unique=True)
+    teacher_id   = Column(Integer, ForeignKey("teacher_profiles.id", ondelete="CASCADE"))
     session_code = Column(String)
     is_active    = Column(Boolean, default=True)
     started_at   = Column(String, default=lambda: dt.datetime.utcnow().isoformat())
 
-    teacher = relationship("TeacherProfile", back_populates="session")
+    teacher = relationship("TeacherProfile", back_populates="sessions")
 
 
 # ── Caption messages — saved to DB, polled every 1-2 s by students ──────────
@@ -187,6 +187,41 @@ for _table, _col in _migrations:
             _conn.commit()
     except Exception:
         pass
+
+# Drop the unique constraint on class_sessions.teacher_id so each session
+# gets its own row.  Needed for existing databases.
+try:
+    with engine.connect() as _conn:
+        if DATABASE_URL.startswith("sqlite"):
+            _row = _conn.execute(text(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='class_sessions'"
+            )).fetchone()
+            if _row and "UNIQUE" in (_row[0] or "").upper():
+                _conn.execute(text("""
+                    CREATE TABLE class_sessions_v2 (
+                        id         INTEGER NOT NULL PRIMARY KEY,
+                        teacher_id INTEGER REFERENCES teacher_profiles(id) ON DELETE CASCADE,
+                        session_code VARCHAR,
+                        is_active  BOOLEAN DEFAULT 1,
+                        started_at VARCHAR
+                    )
+                """))
+                _conn.execute(text(
+                    "INSERT INTO class_sessions_v2 "
+                    "SELECT id, teacher_id, session_code, is_active, started_at "
+                    "FROM class_sessions"
+                ))
+                _conn.execute(text("DROP TABLE class_sessions"))
+                _conn.execute(text("ALTER TABLE class_sessions_v2 RENAME TO class_sessions"))
+                _conn.commit()
+        else:
+            _conn.execute(text(
+                "ALTER TABLE class_sessions "
+                "DROP CONSTRAINT IF EXISTS class_sessions_teacher_id_key"
+            ))
+            _conn.commit()
+except Exception as _e:
+    print(f"[migration] class_sessions unique removal: {_e}")
 
 
 # ─────────────────────────────────────────────
@@ -447,22 +482,23 @@ def toggle_session(
     if not tp:
         raise HTTPException(status_code=404, detail="No teacher profile")
 
-    existing = db.query(ClassSession).filter_by(teacher_id=tp.id).first()
+    active = db.query(ClassSession).filter_by(teacher_id=tp.id, is_active=True).first()
 
-    if existing and existing.is_active:
-        # END the session
-        existing.is_active = False
+    if active:
+        # END the current session — mark it closed, keep its data
+        active.is_active = False
         db.commit()
         return {"active": False, "session_code": None}
     else:
-        # START a new session
-        code = _make_code()
-        if existing:
-            existing.is_active    = True
-            existing.session_code = code
-            existing.started_at   = dt.datetime.utcnow().isoformat()
-        else:
-            db.add(ClassSession(teacher_id=tp.id, session_code=code))
+        # START — always create a brand-new row so each session has its own ID
+        code     = _make_code()
+        new_sess = ClassSession(
+            teacher_id   = tp.id,
+            session_code = code,
+            is_active    = True,
+            started_at   = dt.datetime.utcnow().isoformat(),
+        )
+        db.add(new_sess)
         db.commit()
         return {"active": True, "session_code": code}
 
