@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Request
 
@@ -58,6 +58,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Bulletproof CORS — handles preflight + error responses ───────────────────
+@app.middleware("http")
+async def force_cors(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return Response(
+            status_code=200,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+                "Access-Control-Max-Age": "86400",
+            },
+        )
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
 
 
 # ─────────────────────────────────────────────
@@ -337,14 +356,14 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
     # Send verification email
     code = str(random.randint(100000, 999999))
     expires = dt.datetime.utcnow() + dt.timedelta(minutes=30)
-    otp_store[f"verify_{new_user.email}"] = {"otp": code, "expires_at": expires}
+    otp_store[f"verify_{user.email}"] = {"otp": code, "expires_at": expires}
 
     if SMTP_EMAIL and SMTP_PASSWORD:
         try:
             msg = MIMEMultipart("alternative")
             msg["Subject"] = "VocaLink — Verify Your Email"
             msg["From"]    = SMTP_EMAIL
-            msg["To"]      = new_user.email
+            msg["To"]      = user.email
             html = f"""
             <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f9f9f9;border-radius:12px">
               <h2 style="color:#1AADDC">Welcome to VocaLink!</h2>
@@ -356,13 +375,13 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
             msg.attach(MIMEText(html, "html"))
             with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
                 server.login(SMTP_EMAIL, SMTP_PASSWORD)
-                server.sendmail(SMTP_EMAIL, new_user.email, msg.as_string())
+                server.sendmail(SMTP_EMAIL, user.email, msg.as_string())
         except Exception as e:
-            print(f"Verification email failed: {e} — code for {new_user.email}: {code}")
+            print(f"Verification email failed: {e} — code for {user.email}: {code}")
     else:
-        print(f"[VERIFY] {new_user.email} → {code}")
+        print(f"[VERIFY] {user.email} → {code}")
 
-    return {"message": "Account created! Check your email for a verification code.", "email": new_user.email}
+    return {"message": "Account created! Check your email for a verification code.", "email": user.email}
 
 @app.post("/api/auth/verify-email/")
 def verify_email(data: VerifyEmailSchema, db: Session = Depends(get_db)):
