@@ -56,6 +56,7 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     status = Column(String, default="STUDENT")
+    is_verified = Column(Boolean, default=False)
 
     teacher_profile = relationship("TeacherProfile", back_populates="user", uselist=False)
     student_profile = relationship("StudentProfile", back_populates="user", uselist=False)
@@ -90,6 +91,7 @@ class StudentProfile(Base):
     bio = Column(String, nullable=True)
     grade_level = Column(String, nullable=True)
     disability_type = Column(String, nullable=True)
+    last_seen = Column(String, nullable=True)
 
     instructor = relationship("TeacherProfile", back_populates="students")
     user = relationship("User", back_populates="student_profile")
@@ -135,6 +137,22 @@ class Message(Base):
 Base.metadata.create_all(bind=engine)
 
 # Auto-migration for existing databases
+# Add is_verified to users
+try:
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE users ADD COLUMN is_verified BOOLEAN DEFAULT 0"))
+        conn.commit()
+except Exception:
+    pass
+
+# Add last_seen to student_profiles
+try:
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE student_profiles ADD COLUMN last_seen VARCHAR"))
+        conn.commit()
+except Exception:
+    pass
+
 columns_to_add_teacher = [
     "first_name VARCHAR DEFAULT ''", "last_name VARCHAR DEFAULT ''",
     "grade_handled VARCHAR DEFAULT ''", "organization VARCHAR DEFAULT ''", "bio VARCHAR DEFAULT ''"
@@ -191,6 +209,10 @@ class TTSSchema(BaseModel):
 class BroadcastSchema(BaseModel):
     text: str
     speaker: str = "teacher"
+
+class VerifyEmailSchema(BaseModel):
+    email: str
+    code: str
 
 class SessionLogSchema(BaseModel):
     session_code: str
@@ -445,7 +467,57 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
         db.add(profile)
 
     db.commit()
-    return {"message": "User created successfully"}
+
+    # Send verification email
+    code = str(random.randint(100000, 999999))
+    expires = dt.datetime.utcnow() + dt.timedelta(minutes=30)
+    otp_store[f"verify_{new_user.email}"] = {"otp": code, "expires_at": expires}
+
+    if SMTP_EMAIL and SMTP_PASSWORD:
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = "VocaLink — Verify Your Email"
+            msg["From"]    = SMTP_EMAIL
+            msg["To"]      = new_user.email
+            html = f"""
+            <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f9f9f9;border-radius:12px">
+              <h2 style="color:#1AADDC">Welcome to VocaLink! 🎉</h2>
+              <p>Enter this code to verify your email:</p>
+              <div style="font-size:36px;font-weight:800;letter-spacing:8px;color:#1A1A2E;padding:16px 0">{code}</div>
+              <p style="color:#6B7280;font-size:13px">This code expires in <strong>30 minutes</strong>.</p>
+            </div>
+            """
+            msg.attach(MIMEText(html, "html"))
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(SMTP_EMAIL, SMTP_PASSWORD)
+                server.sendmail(SMTP_EMAIL, new_user.email, msg.as_string())
+        except Exception as e:
+            print(f"Verification email failed: {e} — code for {new_user.email}: {code}")
+    else:
+        print(f"[VERIFY] {new_user.email} → {code}")
+
+    return {"message": "Account created! Check your email for a verification code.", "email": new_user.email}
+
+@app.post("/api/auth/verify-email/")
+def verify_email(data: VerifyEmailSchema, db: Session = Depends(get_db)):
+    key = f"verify_{data.email}"
+    record = otp_store.get(key)
+    if not record:
+        raise HTTPException(status_code=400, detail="No verification code found. Please register again.")
+    if dt.datetime.utcnow() > record["expires_at"]:
+        otp_store.pop(key, None)
+        raise HTTPException(status_code=400, detail="Code expired. Please register again.")
+    if record["otp"] != data.code:
+        raise HTTPException(status_code=400, detail="Invalid code.")
+
+    user = db.query(User).filter(User.email == data.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    user.is_verified = True
+    db.commit()
+    otp_store.pop(key, None)
+    return {"message": "Email verified! You can now sign in."}
 
 @app.post("/api/auth/login/")
 def login(data: LoginSchema, db: Session = Depends(get_db)):
@@ -453,6 +525,9 @@ def login(data: LoginSchema, db: Session = Depends(get_db)):
 
     if not user or not pwd_context.verify(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    if not user.is_verified:
+        raise HTTPException(status_code=403, detail="EMAIL_NOT_VERIFIED")
 
     access_token = create_access_token(data={"user_id": user.id})
     return {"access_token": access_token, "status": user.status}
@@ -650,6 +725,15 @@ def get_messages_from_students(
     ]
 
 # --- 11. STUDENT/TEACHER MANAGEMENT ---
+@app.post("/api/presence/")
+def update_presence(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Student pings this every 30s to mark themselves online."""
+    profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
+    if profile:
+        profile.last_seen = dt.datetime.utcnow().isoformat()
+        db.commit()
+    return {"message": "Presence updated"}
+
 @app.get("/api/teacher/students/")
 def get_my_students(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if current_user.status != "TEACHER":
@@ -657,16 +741,26 @@ def get_my_students(current_user: User = Depends(get_current_user), db: Session 
     profile = current_user.teacher_profile
     if not profile:
         raise HTTPException(status_code=404, detail="Teacher profile not found")
-    return [
-        {
+
+    now = dt.datetime.utcnow()
+    result = []
+    for s in profile.students:
+        is_online = False
+        if s.last_seen:
+            try:
+                last = dt.datetime.fromisoformat(s.last_seen)
+                is_online = (now - last).total_seconds() < 120  # online if seen within 2 min
+            except Exception:
+                pass
+        result.append({
             "id": s.user_id,
             "username": s.user.username,
             "first_name": s.first_name or "",
             "last_name": s.last_name or "",
-            "status": "offline"
-        }
-        for s in profile.students
-    ]
+            "is_online": is_online,
+            "status": "online" if is_online else "idle",
+        })
+    return result
 
 @app.get("/api/users/all-students/")
 def get_all_students(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
