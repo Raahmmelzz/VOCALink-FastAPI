@@ -85,10 +85,8 @@ class User(Base):
     status          = Column(String, default="STUDENT")  # STUDENT | TEACHER
     is_verified     = Column(Boolean, default=False)
 
-    teacher_profile   = relationship("TeacherProfile", back_populates="user", uselist=False)
-    student_profile   = relationship("StudentProfile",  back_populates="user", uselist=False)
-    sent_messages     = relationship("Message", foreign_keys="Message.sender_id",   back_populates="sender")
-    received_messages = relationship("Message", foreign_keys="Message.receiver_id", back_populates="receiver")
+    teacher_profile = relationship("TeacherProfile", back_populates="user", uselist=False)
+    student_profile = relationship("StudentProfile",  back_populates="user", uselist=False)
 
 
 class TeacherProfile(Base):
@@ -149,18 +147,6 @@ class CCMessage(Base):
     sent_at    = Column(String, default=lambda: dt.datetime.utcnow().isoformat())
 
 
-# ── Direct messages (Messages screen) ───────────────────────────────────────
-class Message(Base):
-    __tablename__ = "messages"
-    id          = Column(Integer, primary_key=True, index=True)
-    sender_id   = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
-    receiver_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
-    text        = Column(String)
-    is_aac      = Column(Boolean, default=False)
-    sent_at     = Column(String, default=lambda: dt.datetime.utcnow().isoformat())
-
-    sender   = relationship("User", foreign_keys=[sender_id],   back_populates="sent_messages")
-    receiver = relationship("User", foreign_keys=[receiver_id], back_populates="received_messages")
 
 
 class AACLog(Base):
@@ -172,19 +158,6 @@ class AACLog(Base):
     icon_label = Column(String)
     message    = Column(String, nullable=True)
     tapped_at  = Column(String, default=lambda: dt.datetime.utcnow().isoformat())
-
-
-class Message(Base):
-    __tablename__ = "messages"
-    id          = Column(Integer, primary_key=True, index=True)
-    sender_id   = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
-    receiver_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
-    text        = Column(String)
-    is_aac      = Column(Boolean, default=False)
-    sent_at     = Column(String, default=lambda: dt.datetime.utcnow().isoformat())
-
-    sender   = relationship("User", foreign_keys=[sender_id],   back_populates="sent_messages")
-    receiver = relationship("User", foreign_keys=[receiver_id], back_populates="received_messages")
 
 
 Base.metadata.create_all(bind=engine)
@@ -284,11 +257,6 @@ class ProfileUpdateSchema(BaseModel):
 class BroadcastSchema(BaseModel):
     text:    str
     speaker: str = "teacher"
-
-class MessageSchema(BaseModel):
-    receiver_id: int
-    text:        str
-    is_aac:      bool = False
 
 class AACLogSchema(BaseModel):
     icon_id:    str
@@ -660,17 +628,7 @@ def get_session_log(
             .order_by(AACLog.tapped_at.asc())
             .all()
         )
-        # Typed replies sent during this session period
-        text_replies = (
-            db.query(Message)
-            .filter(
-                Message.sender_id.in_(student_ids),
-                Message.receiver_id == current_user.id,
-                Message.sent_at >= sess.started_at,
-            )
-            .order_by(Message.sent_at.asc())
-            .all()
-        )
+        text_replies = []  # Messages removed — communication via AAC Board → Live CC
 
     name_map = _build_student_name_map(db, student_ids) if student_ids else {}
 
@@ -827,92 +785,7 @@ def get_cc_messages(
 # 10. DIRECT MESSAGES
 # ─────────────────────────────────────────────
 
-@app.post("/api/messages/")
-def send_message(
-    data: MessageSchema,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    msg = Message(
-        sender_id   = current_user.id,
-        receiver_id = data.receiver_id,
-        text        = data.text,
-        is_aac      = data.is_aac,
-        sent_at     = dt.datetime.utcnow().isoformat(),
-    )
-    db.add(msg)
-    db.commit()
-    db.refresh(msg)
-    return {"id": msg.id, "message": "Sent"}
-
-
-@app.get("/api/messages/my-teacher")
-def get_messages_with_teacher(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    if current_user.status != "STUDENT":
-        return []
-    sp = db.query(StudentProfile).filter_by(user_id=current_user.id).first()
-    if not sp or not sp.instructor_id or not sp.instructor:
-        return []
-    other_id = sp.instructor.user_id
-    msgs = (
-        db.query(Message)
-        .filter(
-            ((Message.sender_id == current_user.id) & (Message.receiver_id == other_id)) |
-            ((Message.sender_id == other_id) & (Message.receiver_id == current_user.id))
-        )
-        .order_by(Message.sent_at.asc())
-        .all()
-    )
-    return [
-        {"id": m.id, "sender_id": m.sender_id, "receiver_id": m.receiver_id,
-         "text": m.text, "is_aac": m.is_aac, "sent_at": m.sent_at}
-        for m in msgs
-    ]
-
-
-@app.get("/api/messages/my-students")
-def get_messages_from_students(
-    since: int = 0,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Poll for student→teacher messages only; scoped to the current active session."""
-    if current_user.status != "TEACHER":
-        raise HTTPException(status_code=403, detail="Teachers only")
-    tp = current_user.teacher_profile
-    if not tp:
-        return []
-    ids = [s.user_id for s in tp.students]
-    if not ids:
-        return []
-    sess = db.query(ClassSession).filter_by(teacher_id=tp.id, is_active=True).first()
-    query = (
-        db.query(Message)
-        .filter(
-            Message.sender_id.in_(ids),
-            Message.receiver_id == current_user.id,
-            Message.id > since,
-        )
-    )
-    # Scope to current session so old replies don't bleed into a new session
-    if sess:
-        query = query.filter(Message.sent_at >= sess.started_at)
-    msgs = query.order_by(Message.sent_at.asc()).limit(50).all()
-    name_map = _build_student_name_map(db, ids)
-    return [
-        {
-            "id": m.id,
-            "sender_id": m.sender_id,
-            "text": m.text,
-            "is_aac": m.is_aac,
-            "sent_at": m.sent_at,
-            "student_name": name_map.get(m.sender_id, f"Student #{m.sender_id}"),
-        }
-        for m in msgs
-    ]
+# Messages removed — communication is now via AAC Board → Session Logs → Live CC
 
 
 # ─────────────────────────────────────────────
