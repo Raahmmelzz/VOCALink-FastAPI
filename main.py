@@ -104,7 +104,7 @@ class User(Base):
     email           = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     status          = Column(String, default="STUDENT")  # STUDENT | TEACHER
-    is_verified     = Column(Boolean, default=False)
+    is_verified     = Column(Integer, default=0)  # 0=unverified, 1=verified (DB uses INTEGER)
 
     teacher_profile = relationship("TeacherProfile", back_populates="user", uselist=False)
     student_profile = relationship("StudentProfile",  back_populates="user", uselist=False)
@@ -183,7 +183,7 @@ Base.metadata.create_all(bind=engine)
 
 # ── Safe auto-migrations for existing DBs ────────────────────────────────────
 _migrations = [
-    ("users",            "is_verified BOOLEAN DEFAULT FALSE"),
+    ("users",            "is_verified INTEGER DEFAULT 0"),
     ("student_profiles", "last_seen VARCHAR"),
     ("teacher_profiles", "first_name VARCHAR DEFAULT ''"),
     ("teacher_profiles", "last_name VARCHAR DEFAULT ''"),
@@ -416,7 +416,7 @@ def verify_email(data: VerifyEmailSchema, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
-    user.is_verified = True
+    user.is_verified = 1
     db.commit()
     otp_store.pop(key, None)
     return {"message": "Email verified! You can now sign in."}
@@ -429,7 +429,7 @@ def login(data: LoginSchema, db: Session = Depends(get_db)):
     ).first()
     if not user or not pwd_context.verify(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    if not user.is_verified:
+    if not user.is_verified:  # works for both 0 and False
         raise HTTPException(status_code=403, detail="EMAIL_NOT_VERIFIED")
     return {"access_token": create_access_token({"user_id": user.id}), "status": user.status}
 
