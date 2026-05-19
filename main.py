@@ -154,8 +154,6 @@ class CCMessage(Base):
     sent_at    = Column(String, default=lambda: dt.datetime.utcnow().isoformat())
 
 
-
-
 class AACLog(Base):
     __tablename__ = "aac_logs"
     id         = Column(Integer, primary_key=True, index=True)
@@ -171,7 +169,7 @@ Base.metadata.create_all(bind=engine)
 
 # ── Safe auto-migrations for existing DBs ────────────────────────────────────
 _migrations = [
-    ("users",            "is_verified BOOLEAN DEFAULT 0"),
+    ("users",            "is_verified BOOLEAN DEFAULT FALSE"),
     ("student_profiles", "last_seen VARCHAR"),
     ("teacher_profiles", "first_name VARCHAR DEFAULT ''"),
     ("teacher_profiles", "last_name VARCHAR DEFAULT ''"),
@@ -333,7 +331,7 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
 
     user = User(
         username        = data.username,
-        email           = data.email,
+        email           = str(data.email),
         hashed_password = pwd_context.hash(data.password),
         status          = data.status,
     )
