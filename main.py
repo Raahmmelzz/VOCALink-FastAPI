@@ -966,8 +966,12 @@ def get_teacher_logs(db: Session = Depends(get_db), current_user: User = Depends
 
 
 @app.get("/api/sessions/logs/")
-def get_session_logs(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Broadcast page sidebar: AAC taps from the current active session only."""
+def get_session_logs(
+    since: int = 0,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """AAC icon taps for the current active session; supports ?since=<last_id> for polling."""
     if current_user.status != "TEACHER":
         raise HTTPException(status_code=403, detail="Teachers only")
     tp = current_user.teacher_profile
@@ -984,6 +988,7 @@ def get_session_logs(db: Session = Depends(get_db), current_user: User = Depends
         .filter(
             AACLog.user_id.in_(ids),
             AACLog.tapped_at >= sess.started_at,
+            AACLog.id > since,
         )
         .order_by(AACLog.tapped_at.asc())
         .limit(200)
