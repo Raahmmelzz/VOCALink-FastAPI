@@ -50,23 +50,11 @@ pwd_context  = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 app = FastAPI(title="VocaLink API")
 
-# ── CORS — explicit list required when allow_credentials=True ───────────────
-ALLOWED_ORIGINS = [
-    "http://localhost:8081",
-    "http://localhost:19006",
-    "http://127.0.0.1:8081",
-    "http://127.0.0.1:19006",
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:5173",
-    "https://vocalink-fastapi.onrender.com",
-    # Add your Expo tunnel / ngrok URL here while testing on device
-]
+# ── CORS — open to all origins (JWT Bearer tokens used, not cookies) ─────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
