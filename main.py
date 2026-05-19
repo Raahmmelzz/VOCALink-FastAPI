@@ -378,37 +378,56 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
     print(f"[VERIFY] {user.email} → {code}")
 
     email_sent = False
+    email_error = None
     print(f"[VERIFY CODE] {user.email} → {code}")
 
     if SMTP_EMAIL and SMTP_PASSWORD:
-        def _send():
-            nonlocal email_sent
-            try:
-                msg = MIMEMultipart("alternative")
-                msg["Subject"] = "VocaLink — Verify Your Email"
-                msg["From"]    = SMTP_EMAIL
-                msg["To"]      = user.email
-                msg.attach(MIMEText(f"""
-                <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f9f9f9;border-radius:12px">
-                  <h2 style="color:#1AADDC">Welcome to VocaLink!</h2>
-                  <p>Your verification code:</p>
-                  <div style="font-size:40px;font-weight:800;letter-spacing:10px;color:#1A1A2E;padding:20px 0;text-align:center">{code}</div>
-                  <p style="color:#6B7280;font-size:13px">Expires in <strong>30 minutes</strong>.</p>
-                </div>
-                """, "html"))
-                with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as s:
-                    s.login(SMTP_EMAIL, SMTP_PASSWORD)
-                    s.sendmail(SMTP_EMAIL, user.email, msg.as_string())
-                print(f"[EMAIL] Sent to {user.email}")
-            except Exception as e:
-                print(f"[EMAIL] Failed: {e}")
-        threading.Thread(target=_send, daemon=True).start()
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = "VocaLink — Verify Your Email"
+            msg["From"]    = SMTP_EMAIL
+            msg["To"]      = user.email
+            msg.attach(MIMEText(f"""
+            <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f9f9f9;border-radius:12px">
+              <h2 style="color:#1AADDC">Welcome to VocaLink!</h2>
+              <p>Your verification code:</p>
+              <div style="font-size:40px;font-weight:800;letter-spacing:10px;color:#1A1A2E;padding:20px 0;text-align:center">{code}</div>
+              <p style="color:#6B7280;font-size:13px">Expires in <strong>30 minutes</strong>.</p>
+            </div>
+            """, "html"))
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as s:
+                s.login(SMTP_EMAIL, SMTP_PASSWORD)
+                s.sendmail(SMTP_EMAIL, user.email, msg.as_string())
+            email_sent = True
+            print(f"[EMAIL] Sent to {user.email}")
+        except Exception as e:
+            email_error = str(e)
+            print(f"[EMAIL] Failed: {e}")
+    else:
+        email_error = "SMTP_EMAIL or SMTP_PASSWORD not set on server"
 
     return {
         "message": "Account created! Check your email for a verification code.",
         "email": user.email,
         "email_sent": email_sent,
+        "email_error": email_error,
     }
+
+# Test endpoint to debug SMTP setup
+@app.get("/api/auth/test-smtp/")
+def test_smtp():
+    if not SMTP_EMAIL or not SMTP_PASSWORD:
+        return {
+            "smtp_email_set": bool(SMTP_EMAIL),
+            "smtp_password_set": bool(SMTP_PASSWORD),
+            "error": "SMTP credentials not configured on server"
+        }
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as s:
+            s.login(SMTP_EMAIL, SMTP_PASSWORD)
+        return {"success": True, "message": "SMTP login successful", "email": SMTP_EMAIL}
+    except Exception as e:
+        return {"success": False, "error": str(e), "email": SMTP_EMAIL}
 
 @app.post("/api/auth/verify-email/")
 def verify_email(data: VerifyEmailSchema, db: Session = Depends(get_db)):
