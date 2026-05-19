@@ -21,6 +21,7 @@ import io
 import json
 import random
 import string
+import threading
 import requests
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -375,28 +376,33 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
     expires = dt.datetime.utcnow() + dt.timedelta(minutes=30)
     otp_store[f"verify_{user.email}"] = {"otp": code, "expires_at": expires}
 
+    # Always log the code for testing (check Render logs)
+    print(f"[VERIFY] {user.email} → {code}")
+
+    # Send email in background so signup returns instantly
     if SMTP_EMAIL and SMTP_PASSWORD:
-        try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = "VocaLink — Verify Your Email"
-            msg["From"]    = SMTP_EMAIL
-            msg["To"]      = user.email
-            html = f"""
-            <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f9f9f9;border-radius:12px">
-              <h2 style="color:#1AADDC">Welcome to VocaLink!</h2>
-              <p>Enter this code to verify your email:</p>
-              <div style="font-size:36px;font-weight:800;letter-spacing:8px;color:#1A1A2E;padding:16px 0">{code}</div>
-              <p style="color:#6B7280;font-size:13px">This code expires in <strong>30 minutes</strong>.</p>
-            </div>
-            """
-            msg.attach(MIMEText(html, "html"))
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(SMTP_EMAIL, SMTP_PASSWORD)
-                server.sendmail(SMTP_EMAIL, user.email, msg.as_string())
-        except Exception as e:
-            print(f"Verification email failed: {e} — code for {user.email}: {code}")
-    else:
-        print(f"[VERIFY] {user.email} → {code}")
+        def send_email():
+            try:
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = "VocaLink — Verify Your Email"
+                msg["From"]    = SMTP_EMAIL
+                msg["To"]      = user.email
+                html = f"""
+                <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f9f9f9;border-radius:12px">
+                  <h2 style="color:#1AADDC">Welcome to VocaLink!</h2>
+                  <p>Enter this code to verify your email:</p>
+                  <div style="font-size:36px;font-weight:800;letter-spacing:8px;color:#1A1A2E;padding:16px 0">{code}</div>
+                  <p style="color:#6B7280;font-size:13px">This code expires in <strong>30 minutes</strong>.</p>
+                </div>
+                """
+                msg.attach(MIMEText(html, "html"))
+                with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
+                    server.login(SMTP_EMAIL, SMTP_PASSWORD)
+                    server.sendmail(SMTP_EMAIL, user.email, msg.as_string())
+                print(f"[EMAIL] Sent to {user.email}")
+            except Exception as e:
+                print(f"[EMAIL] Failed for {user.email}: {e}")
+        threading.Thread(target=send_email, daemon=True).start()
 
     return {"message": "Account created! Check your email for a verification code.", "email": user.email}
 
