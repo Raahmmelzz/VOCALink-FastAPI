@@ -381,30 +381,45 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
     email_error = None
     print(f"[VERIFY CODE] {user.email} → {code}")
 
-    if SMTP_EMAIL and SMTP_PASSWORD:
+    BREVO_API_KEY    = os.getenv("BREVO_API_KEY")
+    BREVO_SENDER     = os.getenv("BREVO_SENDER_EMAIL", "olacomarkaidel@gmail.com")
+    BREVO_SENDER_NAME= os.getenv("BREVO_SENDER_NAME", "VocaLink")
+
+    if BREVO_API_KEY:
         try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = "VocaLink — Verify Your Email"
-            msg["From"]    = SMTP_EMAIL
-            msg["To"]      = user.email
-            msg.attach(MIMEText(f"""
-            <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f9f9f9;border-radius:12px">
-              <h2 style="color:#1AADDC">Welcome to VocaLink!</h2>
-              <p>Your verification code:</p>
-              <div style="font-size:40px;font-weight:800;letter-spacing:10px;color:#1A1A2E;padding:20px 0;text-align:center">{code}</div>
-              <p style="color:#6B7280;font-size:13px">Expires in <strong>30 minutes</strong>.</p>
-            </div>
-            """, "html"))
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as s:
-                s.login(SMTP_EMAIL, SMTP_PASSWORD)
-                s.sendmail(SMTP_EMAIL, user.email, msg.as_string())
-            email_sent = True
-            print(f"[EMAIL] Sent to {user.email}")
+            resp = requests.post(
+                "https://api.brevo.com/v3/smtp/email",
+                headers={
+                    "api-key": BREVO_API_KEY,
+                    "Content-Type": "application/json",
+                    "accept": "application/json",
+                },
+                json={
+                    "sender":  {"name": BREVO_SENDER_NAME, "email": BREVO_SENDER},
+                    "to":      [{"email": user.email}],
+                    "subject": "VocaLink — Verify Your Email",
+                    "htmlContent": f"""
+                    <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f9f9f9;border-radius:12px">
+                      <h2 style="color:#1AADDC">Welcome to VocaLink! 🎉</h2>
+                      <p>Your verification code:</p>
+                      <div style="font-size:40px;font-weight:800;letter-spacing:10px;color:#1A1A2E;padding:20px 0;text-align:center">{code}</div>
+                      <p style="color:#6B7280;font-size:13px">Expires in <strong>30 minutes</strong>.</p>
+                    </div>
+                    """,
+                },
+                timeout=10,
+            )
+            if resp.status_code in (200, 201):
+                email_sent = True
+                print(f"[BREVO] Sent to {user.email}")
+            else:
+                email_error = f"Brevo {resp.status_code}: {resp.text}"
+                print(f"[BREVO] Failed: {email_error}")
         except Exception as e:
             email_error = str(e)
-            print(f"[EMAIL] Failed: {e}")
+            print(f"[BREVO] Error: {e}")
     else:
-        email_error = "SMTP_EMAIL or SMTP_PASSWORD not set on server"
+        email_error = "BREVO_API_KEY not set on server"
 
     return {
         "message": "Account created! Check your email for a verification code.",
