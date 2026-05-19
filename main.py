@@ -405,8 +405,7 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
         "message": "Account created! Check your email for a verification code.",
         "email": user.email,
         "email_sent": email_sent,
-        # Include code as fallback if email failed (remove before production)
-        "debug_code": code if not email_sent else None,
+        "debug_code": code,  # Always return so verify page can show it
     }
 
 @app.post("/api/auth/verify-email/")
