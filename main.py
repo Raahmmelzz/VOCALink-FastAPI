@@ -371,12 +371,17 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
         db.rollback()
         print(f"[register] profile warning: {e}")
 
-    # Send verification email
+    # If SMTP not configured → auto-verify so users can log in immediately
+    if not (SMTP_EMAIL and SMTP_PASSWORD):
+        user.is_verified = 1
+        db.commit()
+        print(f"[AUTO-VERIFY] {user.email} — SMTP not configured, auto-verified")
+        return {"message": "Account created! You can now sign in.", "email": user.email, "auto_verified": True}
+
+    # SMTP configured — send verification email
     code = str(random.randint(100000, 999999))
     expires = dt.datetime.utcnow() + dt.timedelta(minutes=30)
     otp_store[f"verify_{user.email}"] = {"otp": code, "expires_at": expires}
-
-    # Always log the code for testing (check Render logs)
     print(f"[VERIFY] {user.email} → {code}")
 
     # Send email in background so signup returns instantly
