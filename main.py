@@ -1,7 +1,8 @@
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
-from fastapi.responses import StreamingResponse, Response
+from fastapi.responses import StreamingResponse, Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Request
+from fastapi.exceptions import RequestValidationError
 
 from sqlalchemy import (
     create_engine, Column, Integer, String,
@@ -48,9 +49,15 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base         = declarative_base()
 pwd_context  = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+CORS_HEADERS = {
+    "Access-Control-Allow-Origin":  "*",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "*",
+}
+
 app = FastAPI(title="VocaLink API")
 
-# ── CORS — open to all origins (JWT Bearer tokens used, not cookies) ─────────
+# ── CORS middleware ────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -59,24 +66,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Bulletproof CORS — handles preflight + error responses ───────────────────
+# ── Force CORS on ALL responses including errors ──────────────────────────────
 @app.middleware("http")
 async def force_cors(request: Request, call_next):
     if request.method == "OPTIONS":
-        return Response(
-            status_code=200,
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-                "Access-Control-Allow-Headers": "*",
-                "Access-Control-Max-Age": "86400",
-            },
-        )
-    response = await call_next(request)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "*"
+        return Response(status_code=200, headers={**CORS_HEADERS, "Access-Control-Max-Age": "86400"})
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        response = JSONResponse(status_code=500, content={"detail": str(exc)})
+    for k, v in CORS_HEADERS.items():
+        response.headers[k] = v
     return response
+
+# ── Exception handlers also include CORS headers ─────────────────────────────
+@app.exception_handler(HTTPException)
+async def http_exc_handler(request: Request, exc: HTTPException):
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=CORS_HEADERS)
+
+@app.exception_handler(RequestValidationError)
+async def validation_exc_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content={"detail": exc.errors()}, headers=CORS_HEADERS)
+
+@app.exception_handler(Exception)
+async def generic_exc_handler(request: Request, exc: Exception):
+    return JSONResponse(status_code=500, content={"detail": str(exc)}, headers=CORS_HEADERS)
 
 
 # ─────────────────────────────────────────────
@@ -329,10 +343,15 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
     ).first():
         raise HTTPException(status_code=400, detail="Username or email already taken")
 
+    try:
+        hashed_pw = pwd_context.hash(data.password)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Password hashing failed: {str(e)}")
+
     user = User(
         username        = data.username,
         email           = str(data.email),
-        hashed_password = pwd_context.hash(data.password),
+        hashed_password = hashed_pw,
         status          = data.status,
     )
     db.add(user)
