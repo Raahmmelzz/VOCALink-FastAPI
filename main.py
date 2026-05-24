@@ -23,18 +23,16 @@ import random
 import string
 import threading
 import requests
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 # ─────────────────────────────────────────────
 # 1. CONFIG
 # ─────────────────────────────────────────────
-SECRET_KEY    = os.getenv("SECRET_KEY", "change-me-in-production")
-ALGORITHM     = "HS256"
-SMTP_EMAIL    = os.getenv("SMTP_EMAIL")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-otp_store: dict = {}
+SECRET_KEY         = os.getenv("SECRET_KEY", "change-me-in-production")
+ALGORITHM          = "HS256"
+BREVO_API_KEY      = os.getenv("BREVO_API_KEY")
+BREVO_SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "noreply@vocalink.app")
+BREVO_SENDER_NAME  = "VocaLink"
+otp_store: dict    = {}
 
 HF_API_URL  = "https://api-inference.huggingface.co/models/rammealz123/VOCALink-Mobile-STT"
 HF_TOKEN    = os.getenv("HUGGINGFACE_TOKEN")
@@ -381,10 +379,6 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
     email_error = None
     print(f"[VERIFY CODE] {user.email} → {code}")
 
-    BREVO_API_KEY    = os.getenv("BREVO_API_KEY")
-    BREVO_SENDER     = os.getenv("BREVO_SENDER_EMAIL", "olacomarkaidel@gmail.com")
-    BREVO_SENDER_NAME= os.getenv("BREVO_SENDER_NAME", "VocaLink")
-
     if BREVO_API_KEY:
         try:
             resp = requests.post(
@@ -395,17 +389,19 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
                     "accept": "application/json",
                 },
                 json={
-                    "sender":  {"name": BREVO_SENDER_NAME, "email": BREVO_SENDER},
-                    "to":      [{"email": user.email}],
+                    "sender": {"name": BREVO_SENDER_NAME, "email": BREVO_SENDER_EMAIL},
+                    "to": [{"email": user.email}],
                     "subject": "VocaLink — Verify Your Email",
-                    "htmlContent": f"""
-                    <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f9f9f9;border-radius:12px">
-                      <h2 style="color:#1AADDC">Welcome to VocaLink! 🎉</h2>
-                      <p>Your verification code:</p>
-                      <div style="font-size:40px;font-weight:800;letter-spacing:10px;color:#1A1A2E;padding:20px 0;text-align:center">{code}</div>
-                      <p style="color:#6B7280;font-size:13px">Expires in <strong>30 minutes</strong>.</p>
-                    </div>
-                    """,
+                    "htmlContent": (
+                        "<div style='font-family:sans-serif;max-width:480px;margin:auto;"
+                        "padding:32px;background:#f9f9f9;border-radius:12px'>"
+                        "<h2 style='color:#1AADDC'>Welcome to VocaLink!</h2>"
+                        "<p>Your verification code:</p>"
+                        f"<div style='font-size:40px;font-weight:800;letter-spacing:10px;"
+                        f"color:#1A1A2E;padding:20px 0;text-align:center'>{code}</div>"
+                        "<p style='color:#6B7280;font-size:13px'>Expires in "
+                        "<strong>30 minutes</strong>.</p></div>"
+                    ),
                 },
                 timeout=10,
             )
@@ -428,21 +424,12 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
         "email_error": email_error,
     }
 
-# Test endpoint to debug SMTP setup
-@app.get("/api/auth/test-smtp/")
-def test_smtp():
-    if not SMTP_EMAIL or not SMTP_PASSWORD:
-        return {
-            "smtp_email_set": bool(SMTP_EMAIL),
-            "smtp_password_set": bool(SMTP_PASSWORD),
-            "error": "SMTP credentials not configured on server"
-        }
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as s:
-            s.login(SMTP_EMAIL, SMTP_PASSWORD)
-        return {"success": True, "message": "SMTP login successful", "email": SMTP_EMAIL}
-    except Exception as e:
-        return {"success": False, "error": str(e), "email": SMTP_EMAIL}
+@app.get("/api/auth/test-brevo/")
+def test_brevo():
+    return {
+        "brevo_api_key_set": bool(BREVO_API_KEY),
+        "sender_email": BREVO_SENDER_EMAIL,
+    }
 
 @app.post("/api/auth/verify-email/")
 def verify_email(data: VerifyEmailSchema, db: Session = Depends(get_db)):
