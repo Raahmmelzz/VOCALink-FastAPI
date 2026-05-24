@@ -1218,7 +1218,11 @@ def text_to_speech(data: TTSSchema, current_user: User = Depends(get_current_use
 # ─────────────────────────────────────────────
 
 @app.post("/api/stt/")
-async def speech_to_text(audio: UploadFile = File(...), current_user: User = Depends(get_current_user)):
+async def speech_to_text(
+    audio: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     try:
         audio_bytes = await audio.read()
         resp = requests.post(HF_API_URL, headers=HF_HEADERS, data=audio_bytes, timeout=30)
@@ -1227,8 +1231,29 @@ async def speech_to_text(audio: UploadFile = File(...), current_user: User = Dep
             return {"error": "Model warming up", "estimated_time": out.get("estimated_time", 20)}
         if resp.status_code != 200:
             raise HTTPException(status_code=resp.status_code, detail=str(out))
+
         if isinstance(out, list) and out:
-            return {"text": out[0].get("text", "")}
-        return {"text": out.get("text", str(out))}
+            text = out[0].get("text", "")
+        else:
+            text = out.get("text", str(out))
+
+        # Auto-broadcast to active session so students receive it via polling
+        if current_user.status == "TEACHER" and text:
+            tp   = current_user.teacher_profile
+            sess = db.query(ClassSession).filter_by(teacher_id=tp.id, is_active=True).first()
+            if sess:
+                msg = CCMessage(
+                    teacher_id = tp.id,
+                    session_id = sess.id,
+                    text       = text,
+                    speaker    = "teacher",
+                    sent_at    = dt.datetime.utcnow().isoformat(),
+                )
+                db.add(msg)
+                db.commit()
+                db.refresh(msg)
+                return {"text": text, "broadcast_id": msg.id}
+
+        return {"text": text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"STT error: {e}")
