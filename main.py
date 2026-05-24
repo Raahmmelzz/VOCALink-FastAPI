@@ -373,49 +373,12 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
     code = str(random.randint(100000, 999999))
     expires = dt.datetime.utcnow() + dt.timedelta(minutes=30)
     otp_store[f"verify_{user.email}"] = {"otp": code, "expires_at": expires}
-    print(f"[VERIFY] {user.email} → {code}")
-
-    email_sent = False
-    email_error = None
     print(f"[VERIFY CODE] {user.email} → {code}")
-
-    if BREVO_API_KEY:
-        try:
-            resp = requests.post(
-                "https://api.brevo.com/v3/smtp/email",
-                headers={
-                    "api-key": BREVO_API_KEY,
-                    "Content-Type": "application/json",
-                    "accept": "application/json",
-                },
-                json={
-                    "sender": {"name": BREVO_SENDER_NAME, "email": BREVO_SENDER_EMAIL},
-                    "to": [{"email": user.email}],
-                    "subject": "VocaLink — Verify Your Email",
-                    "htmlContent": (
-                        "<div style='font-family:sans-serif;max-width:480px;margin:auto;"
-                        "padding:32px;background:#f9f9f9;border-radius:12px'>"
-                        "<h2 style='color:#1AADDC'>Welcome to VocaLink!</h2>"
-                        "<p>Your verification code:</p>"
-                        f"<div style='font-size:40px;font-weight:800;letter-spacing:10px;"
-                        f"color:#1A1A2E;padding:20px 0;text-align:center'>{code}</div>"
-                        "<p style='color:#6B7280;font-size:13px'>Expires in "
-                        "<strong>30 minutes</strong>.</p></div>"
-                    ),
-                },
-                timeout=10,
-            )
-            if resp.status_code in (200, 201):
-                email_sent = True
-                print(f"[BREVO] Sent to {user.email}")
-            else:
-                email_error = f"Brevo {resp.status_code}: {resp.text}"
-                print(f"[BREVO] Failed: {email_error}")
-        except Exception as e:
-            email_error = str(e)
-            print(f"[BREVO] Error: {e}")
+    email_sent, email_error = _send_otp_via_brevo(user.email, code)
+    if email_sent:
+        print(f"[BREVO] Sent to {user.email}")
     else:
-        email_error = "BREVO_API_KEY not set on server"
+        print(f"[BREVO] Failed: {email_error}")
 
     return {
         "message": "Account created! Check your email for a verification code.",
@@ -430,6 +393,52 @@ def test_brevo():
         "brevo_api_key_set": bool(BREVO_API_KEY),
         "sender_email": BREVO_SENDER_EMAIL,
     }
+
+class ResendOTPSchema(BaseModel):
+    email: str
+
+def _send_otp_via_brevo(email: str, code: str) -> tuple[bool, str | None]:
+    if not BREVO_API_KEY:
+        return False, "BREVO_API_KEY not set on server"
+    try:
+        resp = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json", "accept": "application/json"},
+            json={
+                "sender": {"name": BREVO_SENDER_NAME, "email": BREVO_SENDER_EMAIL},
+                "to": [{"email": email}],
+                "subject": "VocaLink — Your Verification Code",
+                "htmlContent": (
+                    "<div style='font-family:sans-serif;max-width:480px;margin:auto;"
+                    "padding:32px;background:#f9f9f9;border-radius:12px'>"
+                    "<h2 style='color:#1AADDC'>VocaLink Email Verification</h2>"
+                    "<p>Your verification code:</p>"
+                    f"<div style='font-size:40px;font-weight:800;letter-spacing:10px;"
+                    f"color:#1A1A2E;padding:20px 0;text-align:center'>{code}</div>"
+                    "<p style='color:#6B7280;font-size:13px'>Expires in <strong>30 minutes</strong>.</p></div>"
+                ),
+            },
+            timeout=10,
+        )
+        if resp.status_code in (200, 201):
+            return True, None
+        return False, f"Brevo {resp.status_code}: {resp.text}"
+    except Exception as e:
+        return False, str(e)
+
+@app.post("/api/auth/forgot-password/")
+def resend_otp(data: ResendOTPSchema, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == data.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="No account found with that email.")
+    if user.is_verified:
+        raise HTTPException(status_code=400, detail="Email already verified.")
+    code = str(random.randint(100000, 999999))
+    expires = dt.datetime.utcnow() + dt.timedelta(minutes=30)
+    otp_store[f"verify_{user.email}"] = {"otp": code, "expires_at": expires}
+    print(f"[RESEND OTP] {user.email} → {code}")
+    sent, error = _send_otp_via_brevo(user.email, code)
+    return {"message": "Verification code resent.", "email_sent": sent, "email_error": error}
 
 @app.post("/api/auth/verify-email/")
 def verify_email(data: VerifyEmailSchema, db: Session = Depends(get_db)):
