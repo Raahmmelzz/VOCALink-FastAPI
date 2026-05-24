@@ -96,6 +96,15 @@ async def generic_exc_handler(request: Request, exc: Exception):
 # 2. MODELS
 # ─────────────────────────────────────────────
 
+class OTPToken(Base):
+    __tablename__ = "otp_tokens"
+    id         = Column(Integer, primary_key=True, index=True)
+    email      = Column(String, index=True)
+    code       = Column(String)
+    expires_at = Column(String)
+    used       = Column(Boolean, default=False)
+
+
 class User(Base):
     __tablename__ = "users"
     id              = Column(Integer, primary_key=True, index=True)
@@ -372,7 +381,9 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
     # Send verification email
     code = str(random.randint(100000, 999999))
     expires = dt.datetime.utcnow() + dt.timedelta(minutes=30)
-    otp_store[f"verify_{user.email}"] = {"otp": code, "expires_at": expires}
+    db.query(OTPToken).filter(OTPToken.email == user.email).delete()
+    db.add(OTPToken(email=user.email, code=code, expires_at=expires.isoformat()))
+    db.commit()
     print(f"[VERIFY CODE] {user.email} → {code}")
     email_sent, email_error = _send_otp_via_brevo(user.email, code)
     if email_sent:
@@ -435,21 +446,28 @@ def resend_otp(data: ResendOTPSchema, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Email already verified.")
     code = str(random.randint(100000, 999999))
     expires = dt.datetime.utcnow() + dt.timedelta(minutes=30)
-    otp_store[f"verify_{user.email}"] = {"otp": code, "expires_at": expires}
+    db.query(OTPToken).filter(OTPToken.email == user.email).delete()
+    db.add(OTPToken(email=user.email, code=code, expires_at=expires.isoformat()))
+    db.commit()
     print(f"[RESEND OTP] {user.email} → {code}")
     sent, error = _send_otp_via_brevo(user.email, code)
     return {"message": "Verification code resent.", "email_sent": sent, "email_error": error}
 
 @app.post("/api/auth/verify-email/")
 def verify_email(data: VerifyEmailSchema, db: Session = Depends(get_db)):
-    key = f"verify_{data.email}"
-    record = otp_store.get(key)
+    record = (
+        db.query(OTPToken)
+        .filter(OTPToken.email == data.email, OTPToken.used == False)
+        .order_by(OTPToken.id.desc())
+        .first()
+    )
     if not record:
-        raise HTTPException(status_code=400, detail="No verification code found. Please register again.")
-    if dt.datetime.utcnow() > record["expires_at"]:
-        otp_store.pop(key, None)
-        raise HTTPException(status_code=400, detail="Code expired. Please register again.")
-    if record["otp"] != data.code:
+        raise HTTPException(status_code=400, detail="No verification code found. Please tap 'Resend Code'.")
+    if dt.datetime.utcnow() > dt.datetime.fromisoformat(record.expires_at):
+        db.delete(record)
+        db.commit()
+        raise HTTPException(status_code=400, detail="Code expired. Please tap 'Resend Code'.")
+    if record.code != data.code:
         raise HTTPException(status_code=400, detail="Invalid code.")
 
     user = db.query(User).filter(User.email == data.email).first()
@@ -457,8 +475,8 @@ def verify_email(data: VerifyEmailSchema, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="User not found.")
 
     user.is_verified = 1
+    record.used = True
     db.commit()
-    otp_store.pop(key, None)
     return {"message": "Email verified! You can now sign in."}
 
 
