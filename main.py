@@ -808,6 +808,61 @@ def broadcast_to_students(
     return {"id": msg.id, "message": "Broadcasted"}
 
 
+@app.post("/api/broadcast/audio/")
+async def broadcast_audio(
+    audio: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Teacher sends a raw audio clip → transcribed by HuggingFace STT →
+    saved as a CCMessage for the active session.
+    Returns {"id": <msg_id>, "text": <transcript>} on success.
+    """
+    if current_user.status != "TEACHER":
+        raise HTTPException(status_code=403, detail="Teachers only")
+
+    tp = current_user.teacher_profile
+    sess = db.query(ClassSession).filter_by(teacher_id=tp.id, is_active=True).first()
+    if not sess:
+        raise HTTPException(status_code=400, detail="No active session — start class first")
+
+    if not HF_TOKEN:
+        raise HTTPException(status_code=503, detail="HuggingFace token not configured")
+
+    audio_bytes = await audio.read()
+    hf_resp = requests.post(HF_API_URL, headers=HF_HEADERS, data=audio_bytes, timeout=30)
+    out = hf_resp.json()
+
+    if hf_resp.status_code == 503 or (isinstance(out, dict) and "estimated_time" in out):
+        raise HTTPException(
+            status_code=503,
+            detail=f"STT model warming up, retry in {out.get('estimated_time', 20):.0f}s",
+        )
+    if hf_resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"STT error: {out}")
+
+    if isinstance(out, list) and out:
+        transcript = out[0].get("text", "").strip()
+    else:
+        transcript = (out.get("text", "") if isinstance(out, dict) else str(out)).strip()
+
+    if not transcript:
+        raise HTTPException(status_code=422, detail="No speech detected in audio")
+
+    msg = CCMessage(
+        teacher_id = tp.id,
+        session_id = sess.id,
+        text       = transcript,
+        speaker    = "teacher",
+        sent_at    = dt.datetime.utcnow().isoformat(),
+    )
+    db.add(msg)
+    db.commit()
+    db.refresh(msg)
+    return {"id": msg.id, "text": transcript}
+
+
 # ─────────────────────────────────────────────
 # 9. CAPTION POLLING  (both teacher feed + student feed)
 # Students call this every 1.5 s with ?since=<last_id>
