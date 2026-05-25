@@ -767,11 +767,12 @@ def check_student_session(
     if current_user.status != "STUDENT":
         return {"active": False}
     sp = db.query(StudentProfile).filter_by(user_id=current_user.id).first()
-    if not sp or not sp.instructor_id:
-        return {"active": False}
-    sess = db.query(ClassSession).filter_by(
-        teacher_id=sp.instructor_id, is_active=True
-    ).first()
+    tid = sp.instructor_id if sp else None
+    if tid:
+        sess = db.query(ClassSession).filter_by(teacher_id=tid, is_active=True).first()
+    else:
+        # No teacher assigned — fall back to any active session so demo works out of the box
+        sess = db.query(ClassSession).filter_by(is_active=True).first()
     if sess:
         return {"active": True, "session_code": sess.session_code}
     return {"active": False}
@@ -877,9 +878,12 @@ def get_cc_messages(
     if current_user.status == "STUDENT":
         sp = db.query(StudentProfile).filter_by(user_id=current_user.id).first()
         tid = sp.instructor_id if sp else None
-        if not tid:
-            return []
-        sess = db.query(ClassSession).filter_by(teacher_id=tid, is_active=True).first()
+        if tid:
+            sess = db.query(ClassSession).filter_by(teacher_id=tid, is_active=True).first()
+        else:
+            # No teacher assigned — fall back to any active session so demo works out of the box
+            sess = db.query(ClassSession).filter_by(is_active=True).first()
+            tid = sess.teacher_id if sess else None
         if not sess:
             return []
         # Scope to current session only so old sessions don't bleed in
