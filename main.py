@@ -490,7 +490,10 @@ def reset_password(data: ResetPasswordSchema, db: Session = Depends(get_db)):
 
 @app.post("/api/auth/resend-verification/")
 def resend_verification(data: ResendOTPSchema, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == data.email).first()
+    user = (
+        db.query(User).filter(User.email == data.email).first() or
+        db.query(User).filter(User.username == data.email).first()
+    )
     if not user:
         raise HTTPException(status_code=404, detail="No account found with that email.")
     code = str(random.randint(100000, 999999))
