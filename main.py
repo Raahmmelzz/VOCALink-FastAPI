@@ -900,10 +900,37 @@ def get_cc_messages(
 
 
 # ─────────────────────────────────────────────
-# 10. DIRECT MESSAGES
+# 10. STUDENT REPLY  (AAC Board → teacher's Live CC)
 # ─────────────────────────────────────────────
 
-# Messages removed — communication is now via AAC Board → Session Logs → Live CC
+class StudentReplySchema(BaseModel):
+    text: str
+
+@app.post("/api/cc/student-reply/")
+def student_reply(
+    data: StudentReplySchema,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.status != "STUDENT":
+        raise HTTPException(status_code=403, detail="Students only")
+    sp = db.query(StudentProfile).filter_by(user_id=current_user.id).first()
+    if not sp or not sp.instructor_id:
+        raise HTTPException(status_code=400, detail="No teacher assigned to your account.")
+    sess = db.query(ClassSession).filter_by(teacher_id=sp.instructor_id, is_active=True).first()
+    if not sess:
+        raise HTTPException(status_code=400, detail="No active class session right now.")
+    msg = CCMessage(
+        teacher_id = sp.instructor_id,
+        session_id = sess.id,
+        text       = data.text,
+        speaker    = "student",
+        sent_at    = dt.datetime.utcnow().isoformat(),
+    )
+    db.add(msg)
+    db.commit()
+    db.refresh(msg)
+    return {"id": msg.id, "text": msg.text}
 
 
 # ─────────────────────────────────────────────
