@@ -400,9 +400,12 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
 
 @app.get("/api/auth/test-brevo/")
 def test_brevo():
+    sent, error = _send_otp_via_brevo(BREVO_SENDER_EMAIL, "123456")
     return {
         "brevo_api_key_set": bool(BREVO_API_KEY),
         "sender_email": BREVO_SENDER_EMAIL,
+        "test_send": "ok" if sent else "failed",
+        "test_error": error,
     }
 
 class ResendOTPSchema(BaseModel):
