@@ -27,12 +27,8 @@ import requests
 # ─────────────────────────────────────────────
 # 1. CONFIG
 # ─────────────────────────────────────────────
-SECRET_KEY         = os.getenv("SECRET_KEY", "change-me-in-production")
-ALGORITHM          = "HS256"
-BREVO_API_KEY      = os.getenv("BREVO_API_KEY")
-BREVO_SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "olacomarkaidel@gmail.com")
-BREVO_SENDER_NAME  = "VocaLink"
-otp_store: dict    = {}
+SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production")
+ALGORITHM  = "HS256"
 
 HF_API_URL  = "https://api-inference.huggingface.co/models/rammealz123/VOCALink-Mobile-STT"
 HF_TOKEN    = os.getenv("HUGGINGFACE_TOKEN")
@@ -361,6 +357,7 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
         email           = str(data.email),
         hashed_password = hashed_pw,
         status          = data.status,
+        is_verified     = 1,
     )
     db.add(user)
     db.commit()
@@ -378,64 +375,13 @@ def register(data: RegisterSchema, db: Session = Depends(get_db)):
         db.rollback()
         print(f"[register] profile warning: {e}")
 
-    # Send verification email
-    code = str(random.randint(100000, 999999))
-    expires = dt.datetime.utcnow() + dt.timedelta(minutes=30)
-    db.query(OTPToken).filter(OTPToken.email == user.email).delete()
-    db.add(OTPToken(email=user.email, code=code, expires_at=expires.isoformat()))
-    db.commit()
-    print(f"[VERIFY CODE] {user.email} → {code}")
-    email_sent, email_error = _send_otp_via_brevo(user.email, code)
-    if email_sent:
-        print(f"[BREVO] Sent to {user.email}")
-    else:
-        print(f"[BREVO] Failed: {email_error}")
-
     return {
-        "message": "Account created! Check your email for a verification code.",
+        "message": "Account created! You can now sign in.",
         "email": user.email,
-        "email_sent": email_sent,
-        "email_error": email_error,
-    }
-
-@app.get("/api/auth/test-brevo/")
-def test_brevo():
-    return {
-        "brevo_api_key_set": bool(BREVO_API_KEY),
-        "sender_email": BREVO_SENDER_EMAIL,
     }
 
 class ResendOTPSchema(BaseModel):
     email: str
-
-def _send_otp_via_brevo(email: str, code: str) -> tuple[bool, str | None]:
-    if not BREVO_API_KEY:
-        return False, "BREVO_API_KEY not set on server"
-    try:
-        resp = requests.post(
-            "https://api.brevo.com/v3/smtp/email",
-            headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json", "accept": "application/json"},
-            json={
-                "sender": {"name": BREVO_SENDER_NAME, "email": BREVO_SENDER_EMAIL},
-                "to": [{"email": email}],
-                "subject": "VocaLink — Your Verification Code",
-                "htmlContent": (
-                    "<div style='font-family:sans-serif;max-width:480px;margin:auto;"
-                    "padding:32px;background:#f9f9f9;border-radius:12px'>"
-                    "<h2 style='color:#1AADDC'>VocaLink Email Verification</h2>"
-                    "<p>Your verification code:</p>"
-                    f"<div style='font-size:40px;font-weight:800;letter-spacing:10px;"
-                    f"color:#1A1A2E;padding:20px 0;text-align:center'>{code}</div>"
-                    "<p style='color:#6B7280;font-size:13px'>Expires in <strong>30 minutes</strong>.</p></div>"
-                ),
-            },
-            timeout=10,
-        )
-        if resp.status_code in (200, 201):
-            return True, None
-        return False, f"Brevo {resp.status_code}: {resp.text}"
-    except Exception as e:
-        return False, str(e)
 
 @app.post("/api/auth/forgot-password/")
 def forgot_password(data: ResendOTPSchema, db: Session = Depends(get_db)):
@@ -448,8 +394,7 @@ def forgot_password(data: ResendOTPSchema, db: Session = Depends(get_db)):
     db.add(OTPToken(email=user.email, code=code, expires_at=expires.isoformat()))
     db.commit()
     print(f"[FORGOT PASSWORD OTP] {user.email} → {code}")
-    sent, error = _send_otp_via_brevo(user.email, code)
-    return {"message": "Reset code sent to your email.", "email_sent": sent, "email_error": error}
+    return {"message": "Reset code generated.", "email_sent": False, "email_error": "No email service configured"}
 
 
 class ResetPasswordSchema(BaseModel):
@@ -496,8 +441,7 @@ def resend_verification(data: ResendOTPSchema, db: Session = Depends(get_db)):
     db.add(OTPToken(email=user.email, code=code, expires_at=expires.isoformat()))
     db.commit()
     print(f"[RESEND VERIFICATION] {user.email} → {code}")
-    sent, error = _send_otp_via_brevo(user.email, code)
-    return {"message": "Verification code resent.", "email_sent": sent, "email_error": error}
+    return {"message": "Verification code generated.", "email_sent": False, "email_error": "No email service configured"}
 
 @app.post("/api/auth/verify-email/")
 def verify_email(data: VerifyEmailSchema, db: Session = Depends(get_db)):
