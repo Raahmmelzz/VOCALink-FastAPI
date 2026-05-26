@@ -242,6 +242,14 @@ try:
 except Exception as _e:
     print(f"[migration] class_sessions unique removal: {_e}")
 
+# Mark all existing unverified users as verified — email verification is removed
+try:
+    with engine.connect() as _conn:
+        _conn.execute(text("UPDATE users SET is_verified = 1 WHERE is_verified = 0 OR is_verified IS NULL"))
+        _conn.commit()
+except Exception as _e:
+    print(f"[migration] verify all users: {_e}")
+
 
 # ─────────────────────────────────────────────
 # 3. SCHEMAS
@@ -432,7 +440,10 @@ def reset_password(data: ResetPasswordSchema, db: Session = Depends(get_db)):
 
 @app.post("/api/auth/resend-verification/")
 def resend_verification(data: ResendOTPSchema, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == data.email).first()
+    user = (
+        db.query(User).filter(User.email == data.email).first() or
+        db.query(User).filter(User.username == data.email).first()
+    )
     if not user:
         raise HTTPException(status_code=404, detail="No account found with that email.")
     code = str(random.randint(100000, 999999))
@@ -477,8 +488,6 @@ def login(data: LoginSchema, db: Session = Depends(get_db)):
     ).first()
     if not user or not pwd_context.verify(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    if not user.is_verified:  # works for both 0 and False
-        raise HTTPException(status_code=403, detail="EMAIL_NOT_VERIFIED")
     return {"access_token": create_access_token({"user_id": user.id}), "status": user.status}
 
 # ─────────────────────────────────────────────
