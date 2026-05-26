@@ -706,7 +706,6 @@ def get_session_log(
 
     student_ids = [s.user_id for s in tp.students]
     aac_logs = []
-    text_replies = []
     if student_ids:
         aac_logs = (
             db.query(AACLog)
@@ -714,7 +713,6 @@ def get_session_log(
             .order_by(AACLog.tapped_at.asc())
             .all()
         )
-        text_replies = []  # Messages removed — communication via AAC Board → Live CC
 
     name_map = _build_student_name_map(db, student_ids) if student_ids else {}
 
@@ -740,17 +738,6 @@ def get_session_log(
             "text":     l.message or l.icon_label,
             "icon_id":  l.icon_id,
         })
-    for r in text_replies:
-        ts = r.sent_at or ""
-        entries.append({
-            "type":     "reply",
-            "id":       f"reply-{r.id}",
-            "sort_key": ts,
-            "time":     ts[11:16] if len(ts) > 15 else ts,
-            "speaker":  name_map.get(r.sender_id, f"Student #{r.sender_id}"),
-            "text":     r.text,
-        })
-
     entries.sort(key=lambda e: e["sort_key"])
 
     return {
