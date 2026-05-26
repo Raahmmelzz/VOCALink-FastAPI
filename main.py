@@ -438,24 +438,66 @@ def _send_otp_via_brevo(email: str, code: str) -> tuple[bool, str | None]:
         return False, str(e)
 
 @app.post("/api/auth/forgot-password/")
-def resend_otp(data: ResendOTPSchema, db: Session = Depends(get_db)):
+def forgot_password(data: ResendOTPSchema, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == data.email).first()
     if not user:
         raise HTTPException(status_code=404, detail="No account found with that email.")
-    if user.is_verified:
-        raise HTTPException(status_code=400, detail="Email already verified.")
     code = str(random.randint(100000, 999999))
     expires = dt.datetime.utcnow() + dt.timedelta(minutes=30)
     db.query(OTPToken).filter(OTPToken.email == user.email).delete()
     db.add(OTPToken(email=user.email, code=code, expires_at=expires.isoformat()))
     db.commit()
-    print(f"[RESEND OTP] {user.email} → {code}")
+    print(f"[FORGOT PASSWORD OTP] {user.email} → {code}")
     sent, error = _send_otp_via_brevo(user.email, code)
-    return {"message": "Verification code resent.", "email_sent": sent, "email_error": error}
+    return {"message": "Reset code sent to your email.", "email_sent": sent, "email_error": error}
+
+
+class ResetPasswordSchema(BaseModel):
+    email: str
+    code: str
+    new_password: str
+
+
+@app.post("/api/auth/reset-password/")
+def reset_password(data: ResetPasswordSchema, db: Session = Depends(get_db)):
+    record = (
+        db.query(OTPToken)
+        .filter(OTPToken.email == data.email, OTPToken.used == False)
+        .order_by(OTPToken.id.desc())
+        .first()
+    )
+    if not record:
+        raise HTTPException(status_code=400, detail="No reset code found. Please request a new one.")
+    if dt.datetime.utcnow() > dt.datetime.fromisoformat(record.expires_at):
+        db.delete(record)
+        db.commit()
+        raise HTTPException(status_code=400, detail="Code expired. Please request a new one.")
+    if record.code != data.code:
+        raise HTTPException(status_code=400, detail="Invalid code.")
+    if len(data.new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
+    user = db.query(User).filter(User.email == data.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    user.hashed_password = pwd_context.hash(data.new_password)
+    record.used = True
+    db.commit()
+    return {"message": "Password reset successfully. You can now sign in."}
+
 
 @app.post("/api/auth/resend-verification/")
 def resend_verification(data: ResendOTPSchema, db: Session = Depends(get_db)):
-    return resend_otp(data, db)
+    user = db.query(User).filter(User.email == data.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="No account found with that email.")
+    code = str(random.randint(100000, 999999))
+    expires = dt.datetime.utcnow() + dt.timedelta(minutes=30)
+    db.query(OTPToken).filter(OTPToken.email == user.email).delete()
+    db.add(OTPToken(email=user.email, code=code, expires_at=expires.isoformat()))
+    db.commit()
+    print(f"[RESEND VERIFICATION] {user.email} → {code}")
+    sent, error = _send_otp_via_brevo(user.email, code)
+    return {"message": "Verification code resent.", "email_sent": sent, "email_error": error}
 
 @app.post("/api/auth/verify-email/")
 def verify_email(data: VerifyEmailSchema, db: Session = Depends(get_db)):
