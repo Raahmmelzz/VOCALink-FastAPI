@@ -714,14 +714,24 @@ def get_session_log(
     entries = []
     for m in cc_msgs:
         ts = m.sent_at or ""
-        entries.append({
-            "type":     "cc",
-            "id":       f"cc-{m.id}",
-            "sort_key": ts,
-            "time":     ts[11:16] if len(ts) > 15 else ts,
-            "speaker":  "Teacher",
-            "text":     m.text,
-        })
+        if m.speaker == "student":
+            entries.append({
+                "type":     "reply",
+                "id":       f"cc-{m.id}",
+                "sort_key": ts,
+                "time":     ts[11:16] if len(ts) > 15 else ts,
+                "speaker":  "Student",
+                "text":     m.text,
+            })
+        else:
+            entries.append({
+                "type":     "cc",
+                "id":       f"cc-{m.id}",
+                "sort_key": ts,
+                "time":     ts[11:16] if len(ts) > 15 else ts,
+                "speaker":  "Teacher",
+                "text":     m.text,
+            })
     for l in aac_logs:
         ts = l.tapped_at or ""
         entries.append({
