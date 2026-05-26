@@ -30,7 +30,7 @@ import requests
 SECRET_KEY         = os.getenv("SECRET_KEY", "change-me-in-production")
 ALGORITHM          = "HS256"
 BREVO_API_KEY      = os.getenv("BREVO_API_KEY")
-BREVO_SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "noreply@vocalink.app")
+BREVO_SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "olacomarkaidel@gmail.com")
 BREVO_SENDER_NAME  = "VocaLink"
 otp_store: dict    = {}
 
@@ -452,6 +452,10 @@ def resend_otp(data: ResendOTPSchema, db: Session = Depends(get_db)):
     print(f"[RESEND OTP] {user.email} → {code}")
     sent, error = _send_otp_via_brevo(user.email, code)
     return {"message": "Verification code resent.", "email_sent": sent, "email_error": error}
+
+@app.post("/api/auth/resend-verification/")
+def resend_verification(data: ResendOTPSchema, db: Session = Depends(get_db)):
+    return resend_otp(data, db)
 
 @app.post("/api/auth/verify-email/")
 def verify_email(data: VerifyEmailSchema, db: Session = Depends(get_db)):
